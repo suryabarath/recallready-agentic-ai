@@ -1,5 +1,13 @@
 # RecallReady A1: 18-record development status — 19 November 2026
 
+**20 November update:** an A1-only LangGraph coordinator and typed CaseState
+are now implemented; the current full suite passed 912 tests in 5.79 seconds.
+See [the coordinator guide](A1_COORDINATOR_GUIDE_2026-11-20.md). Historical
+counts and missing-coordinator notes below predate this addition. A subsequent
+live coordinator pilot passed for `H-1388-2026`, preserving both lot/expiry
+pairs and routing to human review; the coordinator guide records the evidence.
+No A2–A4 workflow is claimed.
+
 This is the current status summary for teammates and final-submission authors.
 It describes a standalone A1 prototype, not a completed four-agent product or
 an independent accuracy evaluation. Detailed case histories remain in the

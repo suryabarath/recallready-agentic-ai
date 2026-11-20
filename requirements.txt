@@ -2,3 +2,5 @@ pydantic==2.14.3
 pytest==9.2.0
 openai==2.54.0
 certifi==2026.10.23
+langgraph==1.2.24
+langsmith==0.15.1

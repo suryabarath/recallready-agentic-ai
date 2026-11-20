@@ -7,6 +7,13 @@ transfer requirements and pending integration. The
 [development record](docs/A1_DEVELOPMENT_RECORD_2026-11-20.md) explains the
 implementation stages, module responsibilities, decisions and verified results.
 
+**Coordinator update:** [A1-only coordinator guide](docs/A1_COORDINATOR_GUIDE_2026-11-20.md)
+documents the new `CaseRequest`/`CaseState` and real LangGraph routing around
+the A1 wrapper. The last full suite passed 912 tests. A live coordinator pilot
+for `H-1388-2026` preserved both lot/expiry pairs and correctly ended at
+`human_review`; its measured usage and source checks are in the guide.
+A2–A4 integration remains pending.
+
 Current implementation: exact source and citation access for all 18 A1
 development recalls and 72 evidence passages. The bounded Group A+B adapter
 and provisional Group C relationship adapter have offline tests and controlled
@@ -33,7 +40,8 @@ Storage-failure handling and resource cleanup have additional offline coverage.
 The approved [run envelope guide](docs/A1_RUN_ENVELOPE_GUIDE.md) explains
 `run_a1_with_trace`, typed outcomes, per-run evidence/usage traces and atomic
 ledger links. It has 41 new offline tests and one successful live Group C
-regression. Mapping it into the actual coordinator remains pending.
+regression. The new A1-only coordinator consumes this envelope; full shared
+workflow integration remains pending.
 Stage 1's [A1 interface record](docs/A1_STAGE1_INTERFACE_PROPOSAL.md) records
 Member 1's approval of the provisional Group C envelope. Stage 2's exact FDA SQLite store can be built
 locally with `.venv/bin/python fda_store.py runtime/fda_a1.sqlite`; it refuses

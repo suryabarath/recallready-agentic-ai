@@ -1,5 +1,11 @@
 # RecallReady Agent 1 — development record
 
+**Subsequent development:** the A1-only coordinator and typed case state are
+now implemented. See [the coordinator guide](A1_COORDINATOR_GUIDE_2026-11-20.md)
+for 32 additional tests, the 912-test result, and a subsequent successful live
+coordinator pilot that routed `H-1388-2026` to human review. The 880-test evidence
+and missing-coordinator statements below retain the earlier handoff history.
+
 **As of:** 20 November 2026. This record explains the implementation for
 teammates and future report authors. It preserves the distinction between
 source validation, simulated-network tests, live development pilots and
