@@ -1,0 +1,2738 @@
+diff --git a/AGENT3_INTEGRATION.md b/AGENT3_INTEGRATION.md
+new file mode 100644
+index 0000000..52e06f7
+--- /dev/null
++++ b/AGENT3_INTEGRATION.md
+@@ -0,0 +1,34 @@
++# RecallReady Agent 3 – integration notes
++
++## Snapshot basis
++
++This branch is based on the uploaded `origin/feature/a1-coordinator` snapshot, with Agent 2's implementation and tests copied from `origin/baseline/agent2`. The archive is not the live remote. No remote branches or pull requests were modified.
++
++## New files
++
++- `a3_agent.py`: typed, deterministic response planner; no inventory mutations or LLM-based disposition.
++- `tests/test_a3_agent.py`: exact, partial, no-match, unresolved, and duplicate-finding cases.
++- Agent 2's `a2_agent.py`, `inventory_store.py`, `inventory_match.py`, `inventory_loader.py` and tests are included so this checkout can import the actual A2 contract.
++
++## Modified files
++
++- `case_state.py`: optional A2/A3 envelopes and event/status validation.
++- `coordinator.py`: optional `inventory_store` dependency and A1 -> A2 -> A3 -> human-review routing.
++
++## Run locally
++
++```bash
++python -m pip install -r requirements.txt
++python -m pytest tests/test_a3_agent.py tests/test_a2_agent.py tests/test_coordinator.py -q
++```
++
++Existing A1-only behavior remains when `inventory_store=None`. To enable A2/A3, pass a configured `InventoryStore` to `A1Coordinator(..., inventory_store=inventory_store)`. See `inventory_store.py` and Agent 2's documentation for how to prepare the synthetic inventory SQLite database.
++
++## Deliberate limitations
++
++- All A3 results are recommendations for **human review**, not approved inventory actions.
++- A4 Safety Critic is not included in the uploaded branch snapshot; the coordinator does not claim to invoke A4.
++- No LLM calls are made in A3. This deterministic baseline can be reviewed and extended with a bounded structured-output LLM later without weakening evidence checks.
++- A2 may return `partial` findings even alongside exact findings; A3 preserves each finding's status and evidence.
++- `RECORD_NO_DEMONSTRATED_MATCH` is case-level and carries no invented item or evidence IDs.
++- Do not merge before running the full tests in an environment with all requirements installed and reviewing integration against the latest remote branches.
+diff --git a/a2_agent.py b/a2_agent.py
+new file mode 100644
+index 0000000..c1c2c48
+--- /dev/null
++++ b/a2_agent.py
+@@ -0,0 +1,573 @@
++"""A2 Inventory Investigation Agent and typed A2-to-A3 contracts.
++
++Receives a validated A1RunEnvelope, extracts source-supported recall scope
++for both 0.1-proposed (A1Result) and 0.2-group-c-provisional (GroupCResult),
++queries authoritative read-only SQLite retailer inventory, and returns strict
++InventoryFinding results without recommending recall actions or dispositions.
++"""
++
++from typing import Annotated, Literal, Self
++
++from a1_run import A1RunEnvelope
++from group_c_contract import GroupCResult
++from inventory_match import (
++    AttributeMatchStatus,
++    InventoryMatch,
++    MatchLevel,
++    RecallInventoryScope,
++    compare_recall_to_inventory,
++    extract_explicit_brand_from_text,
++    extract_package_sizes_from_text,
++)
++from inventory_store import (
++    InventoryRow,
++    InventorySchemaError,
++    InventoryStore,
++    InventoryStoreError,
++)
++from models import A1Result, EvidenceIDs, Nonblank, StrictModel
++from pydantic import Field, model_validator
++
++
++A2ErrorCode = Literal[
++    "a1_unresolved",
++    "a1_context_mismatch",
++    "inventory_store_unavailable",
++    "inventory_schema_invalid",
++    "inventory_match_failed",
++    "ambiguous_recall_scope",
++]
++
++A2Status = Literal["matched", "partial", "no_match", "unresolved"]
++
++
++class A2Error(StrictModel):
++    code: A2ErrorCode
++    message: Nonblank
++    automatic_retry_allowed: Literal[False] = False
++
++
++class InventoryFinding(StrictModel):
++    """Shared Pydantic InventoryFinding contract for the A2-to-A3 boundary.
++
++    Contains only authoritative SQLite inventory attributes, deterministic
++    match statuses, and A1 evidence references. Free-text LLM judgments and
++    A3 stock disposition actions are forbidden.
++    """
++
++    case_id: Nonblank
++    run_id: Nonblank
++    recall_number: Nonblank
++    snapshot_id: Nonblank
++    event_id: Nonblank
++    inventory_set_id: Nonblank
++    item_id: Nonblank
++    retailer_id: Nonblank
++    store_id: Nonblank
++    brand: str
++    product_label: str
++    package_size: str
++    lot_code: str
++    upc: str
++    simulated_quantity: int = Field(ge=0)
++    quantity_unit: Nonblank
++    inventory_reference_date: Nonblank
++    match_status: MatchLevel
++    lot_match: AttributeMatchStatus
++    brand_match: AttributeMatchStatus
++    product_name_match: AttributeMatchStatus
++    package_size_match: AttributeMatchStatus
++    upc_match: AttributeMatchStatus
++    reason_codes: tuple[Nonblank, ...] = Field(min_length=1)
++    a1_evidence_ids: Annotated[EvidenceIDs, Field(min_length=1)]
++    a1_identifier_values: tuple[Nonblank, ...] = ()
++    a1_uncertainties: tuple[Nonblank, ...] = ()
++    requires_human_review: bool
++
++    @model_validator(mode="after")
++    def validate_finding_invariants(self) -> Self:
++        if not self.a1_evidence_ids:
++            raise ValueError("InventoryFinding requires at least one A1 evidence_id")
++        if self.match_status == "exact":
++            if self.lot_match != "matched" or self.product_name_match != "matched":
++                raise ValueError("Exact finding requires matched lot and product_name")
++            if self.requires_human_review or self.a1_uncertainties:
++                raise ValueError("Exact finding cannot carry unresolved A1 uncertainty or require review")
++        if self.match_status == "partial" and not self.requires_human_review:
++            raise ValueError("Partial finding must require human review")
++        return self
++
++
++class A2RunEnvelope(StrictModel):
++    """Typed A2-to-A3 execution boundary."""
++
++    case_id: Nonblank
++    run_id: Nonblank
++    recall_number: Nonblank
++    snapshot_id: Nonblank
++    event_id: Nonblank | None  # None only when A1 never resolved a canonical event
++    status: A2Status
++    findings: list[InventoryFinding] = Field(default_factory=list)
++    error: A2Error | None = None
++    requires_human_review: bool = False
++
++    @model_validator(mode="after")
++    def check_consistency(self) -> Self:
++        if self.status == "unresolved":
++            if self.error is None or self.findings:
++                raise ValueError("Unresolved A2 envelope requires an error and no findings")
++        else:
++            if self.error is not None:
++                raise ValueError("Resolved A2 status cannot carry an error")
++        if self.status == "matched":
++            if not self.findings or not any(f.match_status == "exact" for f in self.findings):
++                raise ValueError("Matched A2 status requires at least one exact finding")
++        elif self.status == "partial":
++            if not self.findings or any(f.match_status == "exact" for f in self.findings):
++                raise ValueError("Partial A2 status requires partial findings and no exact findings")
++            if not self.requires_human_review:
++                raise ValueError("Partial A2 status must require human review")
++        elif self.status == "no_match":
++            if self.findings:
++                raise ValueError("no_match A2 status requires an empty findings list")
++        return self
++
++
++def _extract_a1_scope(
++    envelope: A1RunEnvelope,
++    *,
++    case_id: str,
++    run_id: str | None,
++    recall_number: str | None,
++    snapshot_id: str | None,
++    event_id: str | None,
++) -> tuple[RecallInventoryScope | None, A2Error | None, tuple[str, str, str, str]]:
++    """Validate context against A1RunEnvelope and extract deterministic scope."""
++    eff_run_id = run_id if run_id is not None else envelope.run_id
++    eff_recall = recall_number if recall_number is not None else envelope.trace.recall_number
++    eff_snapshot = snapshot_id if snapshot_id is not None else envelope.trace.snapshot_id
++    eff_event = event_id if event_id is not None else envelope.trace.event_id
++
++    if (
++        (run_id is not None and run_id != envelope.run_id)
++        or (recall_number is not None and recall_number != envelope.trace.recall_number)
++        or (snapshot_id is not None and snapshot_id != envelope.trace.snapshot_id)
++        or (
++            event_id is not None
++            and envelope.trace.event_id is not None
++            and event_id != envelope.trace.event_id
++        )
++    ):
++        return (
++            None,
++            A2Error(
++                code="a1_context_mismatch",
++                message="Caller context differs from A1 envelope trace identity.",
++            ),
++            (eff_run_id, eff_recall, eff_snapshot, eff_event),
++        )
++
++    if envelope.status != "validated" or envelope.result is None:
++        return (
++            None,
++            A2Error(
++                code="a1_unresolved",
++                message="A1 status is unresolved or result is absent; inventory check skipped.",
++            ),
++            (eff_run_id, eff_recall, eff_snapshot, eff_event),
++        )
++
++    result = envelope.result
++    base: A1Result = result.base if isinstance(result, GroupCResult) else result
++    eff_event = base.event_id
++
++    if (
++        base.facts.recall_number != envelope.trace.recall_number
++        or base.snapshot_id != envelope.trace.snapshot_id
++        or (envelope.trace.event_id is not None and base.event_id != envelope.trace.event_id)
++        or (recall_number is not None and base.facts.recall_number != recall_number)
++        or (snapshot_id is not None and base.snapshot_id != snapshot_id)
++        or (event_id is not None and base.event_id != event_id)
++    ):
++        return (
++            None,
++            A2Error(
++                code="a1_context_mismatch",
++                message="A1 result facts differ from envelope trace or caller context.",
++            ),
++            (eff_run_id, eff_recall, eff_snapshot, eff_event),
++        )
++
++    lots: list[str] = []
++    upcs: list[str] = []
++    skus: list[str] = []
++    pkgs: list[str] = list(extract_package_sizes_from_text(base.facts.product_name))
++    ambiguous_pkg_lot = False
++
++    is_group_c = isinstance(result, GroupCResult)
++    notes: list[tuple[str, str]] = []
++    for ident in base.facts.identifiers:
++        if ident.kind in ("lot", "batch"):
++            # Group C lots/codes come only from explicit source relations;
++            # the flat identifier list is never used to widen them.
++            if is_group_c:
++                continue
++            if ident.value not in lots:
++                lots.append(ident.value)
++                if ident.kind == "batch":
++                    # Inventory has a single lot_code column; A1 "batch" values
++                    # are compared against it (needs M1 confirmation) and flagged.
++                    notes.append((ident.value, f"lot_source:batch_identifier:{ident.value}"))
++        elif ident.kind == "upc":
++            if ident.value not in upcs:
++                upcs.append(ident.value)
++        elif ident.kind == "sku":
++            if ident.value not in skus:
++                skus.append(ident.value)
++
++    if isinstance(result, GroupCResult):
++        # Extract explicit lot/date or package relationships without flattening or guessing
++        for rel in result.relations:
++            roles = {part.role: part.value for part in rel.parts}
++            if rel.kind == "date_range":
++                continue  # a date range carries no lot/code to compare
++            key = roles.get("lot") or roles.get("code")
++            if key is not None:
++                if key not in lots:
++                    lots.append(key)
++                state = f"{roles['state']}:" if "state" in roles else ""
++                notes.append((key, f"lot_source:relation:{rel.kind}:{state}{key}|{roles.get('date')}"))
++            if rel.kind == "package_code_date" and "package" in roles and roles["package"] not in pkgs:
++                pkgs.append(roles["package"])
++        # Multiple sizes and multiple lots without an explicit package<->code
++        # relation cannot be paired; never guess the association.
++        has_pkg_relation = any(r.kind == "package_code_date" for r in result.relations)
++        if len(pkgs) > 1 and len(lots) > 1 and not has_pkg_relation:
++            ambiguous_pkg_lot = True
++
++    brand = extract_explicit_brand_from_text(base.facts.product_name)
++
++    scope = RecallInventoryScope(
++        recall_number=base.facts.recall_number,
++        snapshot_id=base.snapshot_id,
++        event_id=base.event_id,
++        product_name=base.facts.product_name,
++        brand=brand,
++        lot_numbers=tuple(lots),
++        package_sizes=tuple(pkgs),
++        upcs=tuple(upcs),
++        skus=tuple(skus),
++        uncertainties=tuple(base.facts.uncertainties),
++        evidence_ids=tuple(base.facts.evidence_ids),
++        has_ambiguous_package_lot_relation=ambiguous_pkg_lot,
++        source_notes=tuple(notes),
++    )
++    return (scope, None, (eff_run_id, eff_recall, eff_snapshot, eff_event))
++
++
++def _build_finding(
++    scope: RecallInventoryScope,
++    row: InventoryRow,
++    match: InventoryMatch,
++    *,
++    case_id: str,
++    run_id: str,
++) -> InventoryFinding:
++    ident_values: list[str] = []
++    for val in (*scope.lot_numbers, *scope.upcs, *scope.skus):
++        if val and val not in ident_values:
++            ident_values.append(val)
++
++    effective_uncertainties = scope.uncertainties
++    matched_lot = match.diagnostics.matched_lot_value
++    provenance = tuple(text for key, text in scope.source_notes if key == matched_lot)
++    reason_codes = match.diagnostics.reason_codes + provenance
++    requires_review = (
++        match.match_status != "exact"
++        or bool(effective_uncertainties)
++        or scope.has_ambiguous_package_lot_relation
++    )
++    effective_status: MatchLevel = (
++        "partial" if (match.match_status == "exact" and requires_review) else match.match_status
++    )
++
++    return InventoryFinding(
++        case_id=case_id,
++        run_id=run_id,
++        recall_number=scope.recall_number,
++        snapshot_id=scope.snapshot_id,
++        event_id=scope.event_id,
++        inventory_set_id=row.inventory_set_id,
++        item_id=row.item_id,
++        retailer_id=row.retailer_id,
++        store_id=row.store_id,
++        brand=row.brand,
++        product_label=row.product_label,
++        package_size=row.package_size,
++        lot_code=row.lot_code,
++        upc=row.upc,
++        simulated_quantity=row.simulated_quantity,
++        quantity_unit=row.quantity_unit,
++        inventory_reference_date=row.inventory_reference_date,
++        match_status=effective_status,
++        lot_match=match.lot,
++        brand_match=match.brand,
++        product_name_match=match.product_name,
++        package_size_match=match.package_size,
++        upc_match=match.upc,
++        reason_codes=reason_codes,
++        a1_evidence_ids=list(scope.evidence_ids),
++        a1_identifier_values=tuple(ident_values),
++        a1_uncertainties=effective_uncertainties,
++        requires_human_review=requires_review,
++    )
++
++
++def run_a2(
++    inventory_store: InventoryStore,
++    envelope: A1RunEnvelope,
++    *,
++    case_id: str = "CASE-DEFAULT",
++    run_id: str | None = None,
++    recall_number: str | None = None,
++    snapshot_id: str | None = None,
++    event_id: str | None = None,
++    candidate_item_ids: tuple[str, ...] | None = None,
++    allow_group_c_or_uncertain: bool = False,
++) -> A2RunEnvelope:
++    """Execute A2 inventory investigation against authoritative read-only SQLite store.
++
++    Preserves A1RunEnvelope identity without copying A1 facts into an editable model.
++    Enforces attribute policy from Section 2.2:
++    - A1 unresolved or context mismatch -> unresolved A2Error
++    - No identifiers and no package information -> unresolved ambiguous_recall_scope
++    - Lot unknown -> never returns exact match; returns partial or unresolved ambiguous_recall_scope
++    - Group C or A1 uncertainty -> stops with ambiguous_recall_scope unless allow_group_c_or_uncertain
++      is enabled (which preserves uncertainty on partial/review-required findings).
++    """
++    if not isinstance(envelope, A1RunEnvelope):
++        raise TypeError("run_a2 requires a validated A1RunEnvelope instance")
++
++    scope, error, (eff_run_id, eff_recall, eff_snapshot, eff_event) = _extract_a1_scope(
++        envelope,
++        case_id=case_id,
++        run_id=run_id,
++        recall_number=recall_number,
++        snapshot_id=snapshot_id,
++        event_id=event_id,
++    )
++    if error is not None or scope is None:
++        return A2RunEnvelope(
++            case_id=case_id,
++            run_id=eff_run_id,
++            recall_number=eff_recall,
++            snapshot_id=eff_snapshot,
++            event_id=eff_event,
++            status="unresolved",
++            error=error,
++            requires_human_review=True,
++        )
++
++    # Duck-typed read-only store (real InventoryStore or a test double).
++    if inventory_store is None or not hasattr(inventory_store, "find_inventory_candidates"):
++        return A2RunEnvelope(
++            case_id=case_id,
++            run_id=eff_run_id,
++            recall_number=eff_recall,
++            snapshot_id=eff_snapshot,
++            event_id=eff_event,
++            status="unresolved",
++            error=A2Error(
++                code="inventory_store_unavailable",
++                message="Authoritative SQLite inventory store is unavailable.",
++            ),
++            requires_human_review=True,
++        )
++
++    if inventory_store.snapshot_id != scope.snapshot_id:
++        return A2RunEnvelope(
++            case_id=case_id,
++            run_id=eff_run_id,
++            recall_number=eff_recall,
++            snapshot_id=eff_snapshot,
++            event_id=eff_event,
++            status="unresolved",
++            error=A2Error(
++                code="a1_context_mismatch",
++                message="Inventory store snapshot_id differs from A1 envelope snapshot_id.",
++            ),
++            requires_human_review=True,
++        )
++
++    result = envelope.result
++    is_group_c = isinstance(result, GroupCResult)
++    has_uncertainty = bool(scope.uncertainties) or is_group_c
++
++    if has_uncertainty and not allow_group_c_or_uncertain:
++        return A2RunEnvelope(
++            case_id=case_id,
++            run_id=eff_run_id,
++            recall_number=eff_recall,
++            snapshot_id=eff_snapshot,
++            event_id=eff_event,
++            status="unresolved",
++            error=A2Error(
++                code="ambiguous_recall_scope",
++                message="A1 result carries uncertainties or Group C relations requiring human review before A2.",
++            ),
++            requires_human_review=True,
++        )
++
++    if scope.has_ambiguous_package_lot_relation:
++        return A2RunEnvelope(
++            case_id=case_id,
++            run_id=eff_run_id,
++            recall_number=eff_recall,
++            snapshot_id=eff_snapshot,
++            event_id=eff_event,
++            status="unresolved",
++            error=A2Error(
++                code="ambiguous_recall_scope",
++                message="Group C package-to-lot association is ambiguous and cannot be flattened or guessed.",
++            ),
++            requires_human_review=True,
++        )
++
++    has_any_identifier = bool(scope.lot_numbers or scope.upcs or scope.skus)
++    if not has_any_identifier and not scope.package_sizes:
++        return A2RunEnvelope(
++            case_id=case_id,
++            run_id=eff_run_id,
++            recall_number=eff_recall,
++            snapshot_id=eff_snapshot,
++            event_id=eff_event,
++            status="unresolved",
++            error=A2Error(
++                code="ambiguous_recall_scope",
++                message="Recall scope has no identifiers and no package information.",
++            ),
++            requires_human_review=True,
++        )
++
++    if not scope.lot_numbers:
++        return A2RunEnvelope(
++            case_id=case_id,
++            run_id=eff_run_id,
++            recall_number=eff_recall,
++            snapshot_id=eff_snapshot,
++            event_id=eff_event,
++            status="unresolved",
++            error=A2Error(
++                code="ambiguous_recall_scope",
++                message="Recall lot is unknown; refusing to broaden search to brand/product/package alone.",
++            ),
++            requires_human_review=True,
++        )
++
++    try:
++        candidates = inventory_store.find_inventory_candidates(
++            brand=scope.brand,
++            product_name=scope.product_name,
++            lot_numbers=scope.lot_numbers,
++            package_sizes=scope.package_sizes,
++            upcs=scope.upcs,
++            candidate_item_ids=candidate_item_ids,
++        )
++    except InventorySchemaError:
++        return A2RunEnvelope(
++            case_id=case_id,
++            run_id=eff_run_id,
++            recall_number=eff_recall,
++            snapshot_id=eff_snapshot,
++            event_id=eff_event,
++            status="unresolved",
++            error=A2Error(
++                code="inventory_schema_invalid",
++                message="Inventory store schema failed validation during candidate lookup.",
++            ),
++            requires_human_review=True,
++        )
++    except InventoryStoreError:
++        return A2RunEnvelope(
++            case_id=case_id,
++            run_id=eff_run_id,
++            recall_number=eff_recall,
++            snapshot_id=eff_snapshot,
++            event_id=eff_event,
++            status="unresolved",
++            error=A2Error(
++                code="inventory_store_unavailable",
++                message="Inventory store read failed during candidate lookup.",
++            ),
++            requires_human_review=True,
++        )
++
++    exact_findings: list[InventoryFinding] = []
++    partial_findings: list[InventoryFinding] = []
++
++    try:
++        for row in candidates:
++            match = compare_recall_to_inventory(scope, row)
++            if match.match_status == "no_match":
++                continue
++            finding = _build_finding(
++                scope,
++                row,
++                match,
++                case_id=case_id,
++                run_id=eff_run_id,
++            )
++            if finding.match_status == "exact":
++                exact_findings.append(finding)
++            elif finding.match_status == "partial":
++                partial_findings.append(finding)
++    except Exception:
++        return A2RunEnvelope(
++            case_id=case_id,
++            run_id=eff_run_id,
++            recall_number=eff_recall,
++            snapshot_id=eff_snapshot,
++            event_id=eff_event,
++            status="unresolved",
++            error=A2Error(
++                code="inventory_match_failed",
++                message="Deterministic inventory comparison failed unexpectedly.",
++            ),
++            requires_human_review=True,
++        )
++
++    if exact_findings:
++        all_findings = exact_findings + partial_findings
++        return A2RunEnvelope(
++            case_id=case_id,
++            run_id=eff_run_id,
++            recall_number=eff_recall,
++            snapshot_id=eff_snapshot,
++            event_id=eff_event,
++            status="matched",
++            findings=all_findings,
++            requires_human_review=any(f.requires_human_review for f in all_findings),
++        )
++
++    if partial_findings:
++        return A2RunEnvelope(
++            case_id=case_id,
++            run_id=eff_run_id,
++            recall_number=eff_recall,
++            snapshot_id=eff_snapshot,
++            event_id=eff_event,
++            status="partial",
++            findings=partial_findings,
++            requires_human_review=True,
++        )
++
++    return A2RunEnvelope(
++        case_id=case_id,
++        run_id=eff_run_id,
++        recall_number=eff_recall,
++        snapshot_id=eff_snapshot,
++        event_id=eff_event,
++        status="no_match",
++        findings=[],
++        requires_human_review=False,
++    )
+diff --git a/a3_agent.py b/a3_agent.py
+new file mode 100644
+index 0000000..10f9d47
+--- /dev/null
++++ b/a3_agent.py
+@@ -0,0 +1,97 @@
++"""Agent 3: bounded, deterministic, evidence-preserving response recommendations.
++
++This version intentionally does not ask an LLM to infer regulatory dispositions.
++It produces review-only recommendations from the validated A2 envelope; A4 and
++human approval are separate downstream responsibilities.
++"""
++from typing import Literal, Self
++from pydantic import Field, model_validator
++from models import Nonblank, StrictModel
++from a2_agent import A2RunEnvelope
++
++ActionCode = Literal[
++    "REVIEW_ITEM", "VERIFY_LOT", "REQUEST_MORE_INFORMATION",
++    "RECORD_NO_DEMONSTRATED_MATCH",
++]
++
++class SuggestedAction(StrictModel):
++    item_id: Nonblank | None
++    action_code: ActionCode
++    reason: Nonblank
++    evidence_ids: list[Nonblank] = Field(default_factory=list)
++    requires_human_review: bool = True
++
++    @model_validator(mode="after")
++    def validate_action(self) -> Self:
++        if len(self.evidence_ids) != len(set(self.evidence_ids)):
++            raise ValueError("Duplicate evidence references")
++        if self.action_code == "RECORD_NO_DEMONSTRATED_MATCH":
++            if self.item_id is not None or self.evidence_ids:
++                raise ValueError("No-match case-level action cannot cite a nonexistent inventory finding")
++        elif self.item_id is None or not self.evidence_ids:
++            raise ValueError("Item action requires an item_id and A1 evidence")
++        return self
++
++class A3RunEnvelope(StrictModel):
++    case_id: Nonblank
++    run_id: Nonblank
++    recall_number: Nonblank
++    snapshot_id: Nonblank
++    event_id: Nonblank | None
++    status: Literal["planned", "unresolved"]
++    suggested_actions: list[SuggestedAction] = Field(default_factory=list)
++    requires_human_review: bool = True
++    error: Nonblank | None = None
++
++    @model_validator(mode="after")
++    def validate_result(self) -> Self:
++        if self.status == "planned" and (not self.suggested_actions or self.error is not None):
++            raise ValueError("Planned result requires actions and no error")
++        if self.status == "unresolved" and (self.suggested_actions or self.error is None):
++            raise ValueError("Unresolved result requires error and no actions")
++        return self
++
++
++def plan_response(a2: A2RunEnvelope) -> A3RunEnvelope:
++    """Map authoritative A2 findings to non-executing, human-review actions.
++
++    No SQLite mutations, stock disposition, public notification, or clearance.
++    A2 unresolved is not silently converted into a no-match decision.
++    """
++    if not isinstance(a2, A2RunEnvelope):
++        raise TypeError("A3 requires a validated A2RunEnvelope")
++    identity = dict(case_id=a2.case_id, run_id=a2.run_id,
++                    recall_number=a2.recall_number, snapshot_id=a2.snapshot_id,
++                    event_id=a2.event_id)
++    if a2.status == "unresolved":
++        return A3RunEnvelope(**identity, status="unresolved",
++                             error="A2 unresolved; no response recommendation can be established.")
++    actions = []
++    seen = set()
++    for finding in a2.findings:
++        if (finding.case_id, finding.run_id, finding.recall_number,
++            finding.snapshot_id, finding.event_id) != (
++                a2.case_id, a2.run_id, a2.recall_number,
++                a2.snapshot_id, a2.event_id):
++            raise ValueError("A2 finding context differs from its envelope")
++        if finding.item_id in seen:
++            raise ValueError("A2 supplied duplicate item_id")
++        seen.add(finding.item_id)
++        if finding.match_status == "exact":
++            action = "REVIEW_ITEM"
++            reason = "Deterministic A2 match; reviewer must confirm any operational response."
++        elif finding.match_status == "partial":
++            action = "VERIFY_LOT" if finding.lot_match != "matched" else "REQUEST_MORE_INFORMATION"
++            reason = "Partial A2 match; verify unresolved attributes and recall scope before any decision."
++        else:
++            raise ValueError("A2 findings must not include no_match entries")
++        actions.append(SuggestedAction(item_id=finding.item_id, action_code=action,
++                                       reason=reason, evidence_ids=list(finding.a1_evidence_ids)))
++    if a2.status == "no_match":
++        if actions:
++            raise ValueError("A2 no_match cannot include findings")
++        actions = [SuggestedAction(item_id=None, action_code="RECORD_NO_DEMONSTRATED_MATCH",
++                                   reason="No demonstrated inventory match in the selected snapshot; this is not a safety clearance.")]
++    elif not actions:
++        raise ValueError("Resolved A2 match status requires findings")
++    return A3RunEnvelope(**identity, status="planned", suggested_actions=actions)
+diff --git a/case_state.py b/case_state.py
+index 026ab64..b8ec059 100644
+--- a/case_state.py
++++ b/case_state.py
+@@ -1,10 +1,12 @@
+-"""A1-only case state; downstream agent contracts remain outside this slice."""
++"""Typed case state for A1 -> A2 -> A3, pending A4 and human approval."""
+ 
+ from typing import Literal, Self
+ 
+ from pydantic import Field, model_validator
+ 
+ from a1_run import A1RunEnvelope, RunError
++from a2_agent import A2RunEnvelope, A2Error
++from a3_agent import A3RunEnvelope
+ from group_c_contract import GroupCResult
+ from models import Nonblank, StrictModel
+ 
+@@ -19,15 +21,19 @@ class CaseRequest(StrictModel):
+ 
+ class CaseEvent(StrictModel):
+     event: Literal["started", "a1_validated", "a1_unresolved", "a1_unexpected_failure",
+-                   "a1_completed", "human_review", "stopped"]
++                   "a1_completed", "a2_matched", "a2_partial", "a2_no_match", "a2_unresolved",
++                   "a2_unexpected_failure", "a3_planned", "a3_unresolved", "a3_unexpected_failure",
++                   "a3_completed", "human_review", "stopped"]
+     timestamp_utc: Nonblank
+ 
+ 
+ class CaseState(CaseRequest):
+-    status: Literal["pending", "running", "a1_completed", "human_review", "unresolved"] = "pending"
++    status: Literal["pending", "running", "a1_completed", "a3_completed", "human_review", "unresolved"] = "pending"
+     a1: A1RunEnvelope | None = None
++    a2: A2RunEnvelope | None = None
++    a3: A3RunEnvelope | None = None
+     events: list[CaseEvent] = Field(default_factory=list)
+-    errors: list[RunError] = Field(default_factory=list)
++    errors: list[RunError | A2Error] = Field(default_factory=list)
+     review_reason: Nonblank | None = None
+     revision_count: Literal[0] = 0  # No critic/revision loop in the A1-only graph.
+ 
+@@ -44,19 +50,49 @@ class CaseState(CaseRequest):
+                     raise ValueError("A1 facts differ from selected case context")
+                 if self.event_id is not None and base.event_id != self.event_id:
+                     raise ValueError("A1 event differs from selected case event")
+-        if self.status in ("a1_completed", "human_review"):
++        if self.a2 is not None:
++            if (self.a2.case_id, self.a2.run_id, self.a2.recall_number, self.a2.snapshot_id) != (
++                    self.case_id, self.run_id, self.recall_number, self.snapshot_id):
++                raise ValueError("A2 context mismatch")
++            if self.a1 is None or self.a1.status != "validated":
++                raise ValueError("A2 requires validated A1")
++            base = self.a1.result.base if isinstance(self.a1.result, GroupCResult) else self.a1.result
++            if self.a2.event_id != base.event_id:
++                raise ValueError("A2 event mismatch")
++        if self.a3 is not None:
++            if self.a2 is None or (self.a3.case_id, self.a3.run_id, self.a3.recall_number,
++                self.a3.snapshot_id, self.a3.event_id) != (self.a2.case_id, self.a2.run_id,
++                self.a2.recall_number, self.a2.snapshot_id, self.a2.event_id):
++                raise ValueError("A3 requires matching A2")
++            if self.a3.status == "planned":
++                available = {f.item_id: set(f.a1_evidence_ids) for f in self.a2.findings}
++                for action in self.a3.suggested_actions:
++                    if action.item_id is not None and (
++                        action.item_id not in available or not set(action.evidence_ids) <= available[action.item_id]
++                    ):
++                        raise ValueError("A3 cites unsupported inventory finding or evidence")
++        if self.status in ("a1_completed", "a3_completed", "human_review"):
+             if self.a1 is None or self.a1.status != "validated" or self.errors:
+-                raise ValueError("Successful A1 route requires a validated envelope and no errors")
++                raise ValueError("Successful/review route requires validated A1 and no errors")
+             result = self.a1.result
+             base = result.base if isinstance(result, GroupCResult) else result
+-            needs_review = isinstance(result, GroupCResult) or bool(base.facts.uncertainties)
+-            if needs_review != (self.status == "human_review"):
+-                raise ValueError("Case route does not preserve the A1 review requirement")
++            a1_review = isinstance(result, GroupCResult) or bool(base.facts.uncertainties)
++            if self.status == "a1_completed" and a1_review:
++                raise ValueError("A1-only completion must not bypass review or downstream results")
++            if self.status == "a3_completed" and (self.a3 is None or self.a3.status != "planned"
++                                                   or self.a2 is None or self.a2.requires_human_review
++                                                   or a1_review):
++                raise ValueError("A3 completion requires an unambiguous plan")
++            if self.status == "human_review" and not (
++                a1_review or (self.a2 is not None and self.a2.requires_human_review)
++                or (self.a3 is not None and self.a3.status == "planned")
++            ):
++                raise ValueError("Human review requires reviewable evidence")
+         if self.status == "human_review" and self.review_reason is None:
+             raise ValueError("Human review requires an explicit reason")
+         if self.status != "human_review" and self.review_reason is not None:
+-            raise ValueError("Review reason is only valid on the review route")
++            raise ValueError("Review reason only valid on review route")
+         if self.status == "unresolved":
+-            if not self.errors or (self.a1 is not None and self.a1.status != "unresolved"):
+-                raise ValueError("Unresolved case requires an error and no validated A1 result")
++            if not self.errors or (self.a1 is not None and self.a1.status == "unresolved" and self.a2 is not None):
++                raise ValueError("Unresolved requires errors and consistent upstream state")
+         return self
+diff --git a/coordinator.py b/coordinator.py
+index 6e06ee1..ef5ec9e 100644
+--- a/coordinator.py
++++ b/coordinator.py
+@@ -1,4 +1,4 @@
+-"""Bounded A1-only LangGraph coordinator; no downstream agents or stock decisions."""
++"""Bounded A1/A2/A3 LangGraph coordinator; no automatic stock decisions."""
+ 
+ from datetime import datetime, timezone
+ 
+@@ -7,6 +7,9 @@ from langsmith import tracing_context
+ from openai import OpenAI
+ 
+ from a1_run import RunError, run_a1_with_trace
++from a2_agent import A2Error, run_a2
++from a3_agent import plan_response
++from inventory_store import InventoryStore
+ from case_state import CaseEvent, CaseRequest, CaseState
+ from fda_store import FDAStore
+ from group_c_contract import GroupCResult
+@@ -27,21 +30,31 @@ class A1Coordinator:
+     """
+ 
+     def __init__(self, store: FDAStore, retriever: QdrantA1, client: OpenAI, budget: Budget, *,
+-                 approved_lots: tuple[HumanLotApproval, ...] = (), max_output_tokens: int = 4000):
++                 approved_lots: tuple[HumanLotApproval, ...] = (), max_output_tokens: int = 4000,
++                 inventory_store: InventoryStore | None = None):
+         self.store, self.retriever, self.client, self.budget = store, retriever, client, budget
+         self.approved_lots = approved_lots
+         self.max_output_tokens = max_output_tokens
++        self.inventory_store = inventory_store
+         graph = StateGraph(CaseState, input_schema=CaseRequest, output_schema=CaseState)
+         graph.add_node("begin", self._begin)
+         graph.add_node("interpret_a1", self._interpret)
+         graph.add_node("complete", self._complete)
++        graph.add_node("investigate_a2", self._investigate_a2)
++        graph.add_node("plan_a3", self._plan_a3)
+         graph.add_node("review", self._review)
+         graph.add_node("stop", self._stop)
+         graph.add_edge(START, "begin")
+         graph.add_edge("begin", "interpret_a1")
+         graph.add_conditional_edges("interpret_a1", self._route,
+                                      {"complete": "complete", "review": "review", "stop": "stop"})
+-        for terminal in ("complete", "review", "stop"):
++        graph.add_conditional_edges("complete", self._after_a1,
++                                    {"investigate_a2": "investigate_a2", "end": END})
++        graph.add_conditional_edges("investigate_a2", self._after_a2,
++                                    {"plan_a3": "plan_a3", "stop": "stop"})
++        graph.add_conditional_edges("plan_a3", self._after_a3,
++                                    {"review": "review", "stop": "stop"})
++        for terminal in ("review", "stop"):
+             graph.add_edge(terminal, END)
+         self._graph = graph.compile()
+ 
+@@ -49,7 +62,7 @@ class A1Coordinator:
+         selected = CaseRequest.model_validate(request)
+         # Do not export source-bearing graph state through ambient LangSmith settings.
+         with tracing_context(enabled=False):
+-            output = self._graph.invoke(selected.model_dump(), config={"recursion_limit": 8})
++            output = self._graph.invoke(selected.model_dump(), config={"recursion_limit": 14})
+         return CaseState.model_validate(output)
+ 
+     @staticmethod
+@@ -85,9 +98,47 @@ class A1Coordinator:
+     def _complete(state: CaseState) -> dict:
+         return {"status": "a1_completed", "events": state.events + [_event("a1_completed")]}
+ 
++    def _after_a1(self, state: CaseState) -> str:
++        return "investigate_a2" if self.inventory_store is not None else "end"
++
++    def _investigate_a2(self, state: CaseState) -> dict:
++        try:
++            result = run_a2(self.inventory_store, state.a1, case_id=state.case_id,
++                            run_id=state.run_id, recall_number=state.recall_number,
++                            snapshot_id=state.snapshot_id, event_id=state.event_id)
++        except Exception:
++            return {"errors": state.errors + [A2Error(code="inventory_match_failed",
++                    message="A2 execution failed unexpectedly; review required.")],
++                    "events": state.events + [_event("a2_unexpected_failure")]}
++        name = {"matched": "a2_matched", "partial": "a2_partial",
++                "no_match": "a2_no_match", "unresolved": "a2_unresolved"}[result.status]
++        return {"a2": result, "errors": state.errors + ([result.error] if result.error else []),
++                "events": state.events + [_event(name)]}
++
++    @staticmethod
++    def _after_a2(state: CaseState) -> str:
++        return "stop" if state.a2 is None or state.a2.status == "unresolved" else "plan_a3"
++
++    @staticmethod
++    def _plan_a3(state: CaseState) -> dict:
++        try:
++            result = plan_response(state.a2)
++        except Exception:
++            return {"errors": state.errors + [A2Error(code="inventory_match_failed",
++                    message="A3 planning failed; review required.")],
++                    "events": state.events + [_event("a3_unexpected_failure")]}
++        return {"a3": result, "events": state.events + [_event(
++            "a3_planned" if result.status == "planned" else "a3_unresolved")]}
++
++    @staticmethod
++    def _after_a3(state: CaseState) -> str:
++        return "review" if state.a3 is not None and state.a3.status == "planned" else "stop"
++
+     @staticmethod
+     def _review(state: CaseState) -> dict:
+-        return {"status": "human_review", "review_reason": "A1 relationships or uncertainties require human review.",
++        return {"status": "human_review", "review_reason": ("A3 recommendations require human approval; no inventory action was executed."
++                                 if state.a3 is not None else
++                                 "A1 relationships or uncertainties require human review."),
+                 "events": state.events + [_event("human_review")]}
+ 
+     @staticmethod
+diff --git a/inventory_loader.py b/inventory_loader.py
+new file mode 100644
+index 0000000..ddf854d
+--- /dev/null
++++ b/inventory_loader.py
+@@ -0,0 +1,186 @@
++"""Synthetic retailer inventory JSON-to-SQLite loader for A2.
++
++Loads 02_retailer_inventory_SYNTHETIC.json into an exact read-only-ready SQLite
++schema with manifest verification (48 sets, 96 rows, 1 *-A and 1 *-B per set).
++Does not inject FDA recall facts or evaluation labels.
++"""
++
++import argparse
++import hashlib
++import json
++from pathlib import Path
++import sqlite3
++
++
++
++DEFAULT_INVENTORY_JSON = (
++    Path(__file__).resolve().parent.parent / "02_retailer_inventory_SYNTHETIC.json"
++)
++
++INVENTORY_COLUMNS = (
++    "inventory_set_id",
++    "item_id",
++    "retailer_id",
++    "store_id",
++    "product_label",
++    "brand",
++    "upc",
++    "lot_code",
++    "package_size",
++    "simulated_quantity",
++    "quantity_unit",
++    "inventory_reference_date",
++    "source_type",
++    "synthetic_generation_note",
++)
++
++
++class InventoryLoadError(ValueError):
++    """The synthetic inventory JSON or target database cannot be validated."""
++
++
++def _validate_record_shape(record: object) -> dict:
++    if not isinstance(record, dict):
++        raise InventoryLoadError("Inventory record must be a JSON object")
++    if set(record.keys()) != set(INVENTORY_COLUMNS):
++        raise InventoryLoadError("Inventory record keys differ from required column set")
++    for col in INVENTORY_COLUMNS:
++        val = record[col]
++        if col == "simulated_quantity":
++            if isinstance(val, bool) or not isinstance(val, int) or val < 0:
++                raise InventoryLoadError("simulated_quantity must be a non-negative integer")
++        else:
++            if not isinstance(val, str):
++                raise InventoryLoadError(f"Column {col} must be a string")
++    if not record["inventory_set_id"].strip() or not record["item_id"].strip():
++        raise InventoryLoadError("inventory_set_id and item_id must be nonblank")
++    if record["source_type"] != "SYNTHETIC":
++        raise InventoryLoadError("Inventory source_type must be SYNTHETIC")
++    return record
++
++
++def build_inventory_store(
++    db_path: Path,
++    *,
++    json_path: Path = DEFAULT_INVENTORY_JSON,
++    expected_set_count: int | None = 48,
++    expected_record_count: int | None = 96,
++) -> None:
++    """Create a new synthetic retailer inventory SQLite database from JSON.
++
++    Refuses to overwrite an existing database file. Validates exact set and
++    row counts and ensures every set has one *-A and one *-B row.
++    """
++    db_path = Path(db_path)
++    if db_path.exists():
++        raise InventoryLoadError(f"Refusing to overwrite existing database: {db_path}")
++    json_path = Path(json_path)
++    try:
++        raw_bytes = json_path.read_bytes()
++        payload = json.loads(raw_bytes.decode("utf-8-sig"))
++    except Exception as exc:
++        raise InventoryLoadError("Unable to read synthetic inventory JSON") from exc
++
++    if not isinstance(payload, dict):
++        raise InventoryLoadError("Top-level inventory JSON must be an object")
++    if payload.get("synthetic") is not True:
++        raise InventoryLoadError("Inventory JSON must declare synthetic=true")
++    snapshot_id = payload.get("reference_snapshot_id")
++    if not isinstance(snapshot_id, str) or not snapshot_id.strip():
++        raise InventoryLoadError("Missing or invalid reference_snapshot_id")
++    records = payload.get("records")
++    if not isinstance(records, list) or not records:
++        raise InventoryLoadError("Inventory JSON must contain a non-empty records list")
++
++    validated_records = [_validate_record_shape(r) for r in records]
++    if expected_record_count is not None and len(validated_records) != expected_record_count:
++        raise InventoryLoadError(
++            f"Expected {expected_record_count} inventory records, got {len(validated_records)}"
++        )
++
++    sets: dict[str, list[str]] = {}
++    seen_items: set[str] = set()
++    for rec in validated_records:
++        item_id = rec["item_id"]
++        if item_id in seen_items:
++            raise InventoryLoadError(f"Duplicate item_id: {item_id}")
++        seen_items.add(item_id)
++        sets.setdefault(rec["inventory_set_id"], []).append(item_id)
++
++    if expected_set_count is not None and len(sets) != expected_set_count:
++        raise InventoryLoadError(
++            f"Expected {expected_set_count} inventory sets, got {len(sets)}"
++        )
++    for set_id, item_ids in sets.items():
++        a_items = [i for i in item_ids if i.endswith("-A")]
++        b_items = [i for i in item_ids if i.endswith("-B")]
++        if len(item_ids) != 2 or len(a_items) != 1 or len(b_items) != 1:
++            raise InventoryLoadError(
++                f"Inventory set {set_id} must contain exactly one *-A and one *-B row"
++            )
++
++    source_sha256 = hashlib.sha256(raw_bytes).hexdigest()
++    db_path.parent.mkdir(parents=True, exist_ok=True)
++    db = sqlite3.connect(db_path)
++    try:
++        with db:
++            db.execute("PRAGMA foreign_keys=ON")
++            db.executescript(
++                """
++                CREATE TABLE manifest (
++                    synthetic INTEGER NOT NULL CHECK(synthetic = 1),
++                    reference_snapshot_id TEXT PRIMARY KEY,
++                    source_sha256 TEXT NOT NULL,
++                    set_count INTEGER NOT NULL CHECK(set_count > 0),
++                    record_count INTEGER NOT NULL CHECK(record_count > 0)
++                );
++                CREATE TABLE inventory (
++                    inventory_set_id TEXT NOT NULL,
++                    item_id TEXT PRIMARY KEY,
++                    retailer_id TEXT NOT NULL,
++                    store_id TEXT NOT NULL,
++                    product_label TEXT NOT NULL,
++                    brand TEXT NOT NULL,
++                    upc TEXT NOT NULL,
++                    lot_code TEXT NOT NULL,
++                    package_size TEXT NOT NULL,
++                    simulated_quantity INTEGER NOT NULL CHECK(simulated_quantity >= 0),
++                    quantity_unit TEXT NOT NULL,
++                    inventory_reference_date TEXT NOT NULL,
++                    source_type TEXT NOT NULL CHECK(source_type = 'SYNTHETIC'),
++                    synthetic_generation_note TEXT NOT NULL
++                );
++                CREATE INDEX idx_inventory_upc ON inventory(upc);
++                CREATE INDEX idx_inventory_lot_code ON inventory(lot_code);
++                CREATE INDEX idx_inventory_product_label ON inventory(product_label);
++                """
++            )
++            db.execute(
++                "INSERT INTO manifest VALUES (1, ?, ?, ?, ?)",
++                (snapshot_id, source_sha256, len(sets), len(validated_records)),
++            )
++            for rec in validated_records:
++                db.execute(
++                    """
++                    INSERT INTO inventory VALUES (
++                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
++                    )
++                    """,
++                    tuple(rec[col] for col in INVENTORY_COLUMNS),
++                )
++    finally:
++        db.close()
++
++
++if __name__ == "__main__":
++    parser = argparse.ArgumentParser(description="Build synthetic retailer inventory SQLite database")
++    parser.add_argument("db_path", type=Path, help="New SQLite database path; existing files are refused")
++    parser.add_argument(
++        "--json-path",
++        type=Path,
++        default=DEFAULT_INVENTORY_JSON,
++        help="Path to 02_retailer_inventory_SYNTHETIC.json",
++    )
++    args = parser.parse_args()
++    build_inventory_store(args.db_path, json_path=args.json_path)
++    print(f"Created {args.db_path} from {args.json_path}")
+diff --git a/inventory_match.py b/inventory_match.py
+new file mode 100644
+index 0000000..6bde761
+--- /dev/null
++++ b/inventory_match.py
+@@ -0,0 +1,286 @@
++"""Deterministic lot/brand/package/product/UPC comparison tool for A2.
++
++Pure deterministic function with no LLM calls, no Qdrant queries, and no SQLite writes.
++Preserves exact SQLite strings in findings while keeping normalized forms in diagnostics only.
++"""
++
++import re
++from typing import Literal
++
++from inventory_store import (
++    InventoryRow,
++    _normalize_upc_digits,
++    _parse_package_value_unit,
++    deterministic_product_name_matches,
++)
++from models import Nonblank, StrictModel
++from pydantic import Field
++
++
++AttributeMatchStatus = Literal["matched", "mismatched", "unknown"]
++MatchLevel = Literal["exact", "partial", "no_match"]
++
++_PACKAGE_PATTERN = re.compile(
++    r"(?<!\w)(\d+(?:\.\d+)?)\s*(oz|ounces?|lb|lbs|pounds?|g|grams?|kg|kilograms?|gallons?|gal)\b",
++    re.IGNORECASE,
++)
++_EXPLICIT_BRAND_PATTERN = re.compile(
++    r"\b([A-Za-z0-9][A-Za-z0-9 '&.\-]{0,40}?)\s+brand\b",
++    re.IGNORECASE,
++)
++
++
++class RecallInventoryScope(StrictModel):
++    recall_number: Nonblank
++    snapshot_id: Nonblank
++    event_id: Nonblank
++    product_name: str | None = None
++    brand: str | None = None
++    lot_numbers: tuple[str, ...] = ()
++    package_sizes: tuple[str, ...] = ()
++    upcs: tuple[str, ...] = ()
++    skus: tuple[str, ...] = ()
++    uncertainties: tuple[str, ...] = ()
++    evidence_ids: tuple[str, ...] = ()
++    has_ambiguous_package_lot_relation: bool = False
++    # (lot/code value, provenance text) pairs, e.g. which Group C relation or
++    # batch identifier a lot value came from. Diagnostics only.
++    source_notes: tuple[tuple[str, str], ...] = ()
++
++
++class MatchDiagnostics(StrictModel):
++    normalized_recall_upcs: tuple[str, ...] = ()
++    normalized_inventory_upc: str | None = None
++    normalized_recall_packages: tuple[str, ...] = ()
++    normalized_inventory_package: str | None = None
++    matched_lot_value: str | None = None
++    reason_codes: tuple[Nonblank, ...] = Field(min_length=1)
++
++
++class InventoryMatch(StrictModel):
++    item_id: Nonblank
++    lot: AttributeMatchStatus
++    brand: AttributeMatchStatus
++    product_name: AttributeMatchStatus
++    package_size: AttributeMatchStatus
++    upc: AttributeMatchStatus
++    match_status: MatchLevel
++    diagnostics: MatchDiagnostics
++
++
++def extract_package_sizes_from_text(text: str | None) -> tuple[str, ...]:
++    """Extract literal package-size substrings from FDA product description."""
++    if not text:
++        return ()
++    found: list[str] = []
++    for match in _PACKAGE_PATTERN.finditer(text):
++        literal = match.group(0).strip()
++        if literal not in found:
++            found.append(literal)
++    return tuple(found)
++
++
++def extract_explicit_brand_from_text(text: str | None) -> str | None:
++    """Extract brand only when explicitly labeled '<Name> brand' in FDA product text.
++
++    Never infers brand from recalling_firm or unlabeled descriptions.
++    """
++    if not text:
++        return None
++    match = _EXPLICIT_BRAND_PATTERN.search(text)
++    if not match:
++        return None
++    candidate = match.group(1).strip(" ,;:\"'-")
++    # Strip leading articles or generic prefixes if any
++    if not candidate or candidate.lower() in {"following", "the", "a", "an", "private"}:
++        return None
++    return candidate
++
++
++def _compare_lot(recall_lots: tuple[str, ...], inv_lot: str) -> tuple[AttributeMatchStatus, str | None]:
++    clean_recall_lots = tuple(lot for lot in recall_lots if isinstance(lot, str) and lot != "")
++    if not clean_recall_lots or inv_lot == "":
++        return ("unknown", None)
++    # Exact string comparison preserving leading zeros and case
++    for lot in clean_recall_lots:
++        if inv_lot == lot:
++            return ("matched", lot)
++    return ("mismatched", None)
++
++
++def _compare_brand(recall_brand: str | None, inv_brand: str) -> AttributeMatchStatus:
++    if not recall_brand or not recall_brand.strip() or not inv_brand or not inv_brand.strip():
++        return "unknown"
++    if " ".join(recall_brand.strip().lower().split()) == " ".join(inv_brand.strip().lower().split()):
++        return "matched"
++    return "mismatched"
++
++
++def _compare_product_name(recall_product: str | None, inv_label: str) -> AttributeMatchStatus:
++    if not recall_product or not recall_product.strip() or not inv_label or not inv_label.strip():
++        return "unknown"
++    if deterministic_product_name_matches(recall_product, inv_label):
++        return "matched"
++    return "mismatched"
++
++
++def _compare_package_size(
++    recall_pkgs: tuple[str, ...], inv_pkg: str
++) -> tuple[AttributeMatchStatus, tuple[str, ...], str | None]:
++    parsed_recall: list[tuple[float, str]] = []
++    norm_recall_strs: list[str] = []
++    for pkg in recall_pkgs:
++        parsed = _parse_package_value_unit(pkg)
++        if parsed is not None:
++            parsed_recall.append(parsed)
++            norm_str = f"{parsed[0]:g} {parsed[1]}"
++            if norm_str not in norm_recall_strs:
++                norm_recall_strs.append(norm_str)
++
++    parsed_inv = _parse_package_value_unit(inv_pkg)
++    norm_inv_str = f"{parsed_inv[0]:g} {parsed_inv[1]}" if parsed_inv is not None else None
++
++    if not parsed_recall or parsed_inv is None:
++        if recall_pkgs and inv_pkg.strip():
++            # Both provide non-empty text, check exact lower match if unit parser didn't match
++            if inv_pkg.strip().lower() in {p.strip().lower() for p in recall_pkgs if p.strip()}:
++                return ("matched", tuple(norm_recall_strs), norm_inv_str)
++            return ("mismatched", tuple(norm_recall_strs), norm_inv_str)
++        return ("unknown", tuple(norm_recall_strs), norm_inv_str)
++
++    if parsed_inv in parsed_recall:
++        return ("matched", tuple(norm_recall_strs), norm_inv_str)
++    return ("mismatched", tuple(norm_recall_strs), norm_inv_str)
++
++
++def _compare_upc(
++    recall_upcs: tuple[str, ...], inv_upc: str
++) -> tuple[AttributeMatchStatus, tuple[str, ...], str | None]:
++    norm_recall: list[str] = []
++    for u in recall_upcs:
++        digits = _normalize_upc_digits(u)
++        if digits is not None and digits not in norm_recall:
++            norm_recall.append(digits)
++    norm_inv = _normalize_upc_digits(inv_upc)
++    if not norm_recall or norm_inv is None:
++        if recall_upcs and inv_upc.strip():
++            return ("mismatched", tuple(norm_recall), norm_inv)
++        return ("unknown", tuple(norm_recall), norm_inv)
++    if norm_inv in norm_recall:
++        return ("matched", tuple(norm_recall), norm_inv)
++    return ("mismatched", tuple(norm_recall), norm_inv)
++
++
++def compare_recall_to_inventory(
++    recall_attributes: RecallInventoryScope,
++    inventory_row: InventoryRow,
++) -> InventoryMatch:
++    """Compare source-supported A1 recall attributes to one authoritative inventory row."""
++    lot_status, matched_lot = _compare_lot(recall_attributes.lot_numbers, inventory_row.lot_code)
++    brand_status = _compare_brand(recall_attributes.brand, inventory_row.brand)
++    product_status = _compare_product_name(recall_attributes.product_name, inventory_row.product_label)
++    pkg_status, norm_rec_pkgs, norm_inv_pkg = _compare_package_size(
++        recall_attributes.package_sizes, inventory_row.package_size
++    )
++    upc_status, norm_rec_upcs, norm_inv_upc = _compare_upc(
++        recall_attributes.upcs, inventory_row.upc
++    )
++
++    reasons: list[str] = [
++        f"lot_{lot_status}",
++        f"product_{product_status}",
++        f"package_{pkg_status}",
++        f"upc_{upc_status}",
++        f"brand_{brand_status}",
++    ]
++
++    if recall_attributes.has_ambiguous_package_lot_relation:
++        reasons.append("ambiguous_package_lot_relation")
++    if recall_attributes.uncertainties:
++        reasons.append("a1_uncertainty_present")
++
++    # Determine overall match level per Section 2.2 and Section 4.3:
++    # - Any explicit mismatch on a primary or concrete compared attribute (product, lot, package, upc, brand)
++    #   or completely unrelated product -> no_match (unless lot matched and a secondary attribute is unknown).
++    # - Wait: if product_status == "mismatched" -> no_match (filters out *-B distractors and unrelated items).
++    # - If lot_status == "mismatched" -> no_match.
++    # - If package_size == "mismatched" or upc == "mismatched" or brand == "mismatched" -> no_match.
++    has_mismatch = any(
++        status == "mismatched"
++        for status in (lot_status, product_status, pkg_status, upc_status, brand_status)
++    )
++
++    if has_mismatch or product_status != "matched":
++        match_level: MatchLevel = "no_match"
++    elif lot_status == "matched":
++        # Lot and product matched, and no concrete attribute mismatched.
++        # Check whether any required scope attribute is missing/ambiguous:
++        # 1. If recall has package_sizes or inventory requires package_size and pkg_status == "unknown"
++        # 2. If recall has upcs and upc_status == "unknown"
++        # 3. If recall has brand and brand_status == "unknown"
++        # 4. If A1 has uncertainties or ambiguous Group C relation
++        secondary_unknown = (
++            (bool(recall_attributes.package_sizes) and pkg_status == "unknown")
++            or (bool(recall_attributes.upcs) and upc_status == "unknown")
++            or (bool(recall_attributes.brand) and brand_status == "unknown")
++            or bool(recall_attributes.uncertainties)
++            or recall_attributes.has_ambiguous_package_lot_relation
++        )
++        if secondary_unknown:
++            match_level = "partial"
++            # A blank inventory attribute is "unknown", never a match: the row
++            # cannot become exact until the attribute is known (requirements 2.2).
++            if recall_attributes.package_sizes and pkg_status == "unknown":
++                reasons.append("secondary_unknown:package_size")
++            if recall_attributes.upcs and upc_status == "unknown":
++                reasons.append("secondary_unknown:upc")
++            if recall_attributes.brand and brand_status == "unknown":
++                reasons.append("secondary_unknown:brand")
++            reasons.append("lot_matched_with_unknown_or_uncertain_secondary_attribute")
++        else:
++            match_level = "exact"
++            reasons.append("exact_scope_match")
++    else:
++        # lot_status is "unknown" while product matched and no concrete attribute mismatched.
++        # Per Section 2.2:
++        # - If the recall specifies lot_numbers, a row with empty lot_code ("unknown" lot)
++        #   must NOT be claimed as a match unless it matched an explicit product identifier
++        #   (such as UPC) or when the recall itself has no lot numbers (e.g. Group C review).
++        #   This ensures *-B distractors (which have blank lot_code and blank UPC) are excluded!
++        if recall_attributes.lot_numbers:
++            if upc_status == "matched":
++                match_level = "partial"
++                reasons.append("lot_missing_in_inventory_with_matched_upc")
++            else:
++                match_level = "no_match"
++                reasons.append("lot_missing_in_inventory_for_lot_scoped_recall")
++        else:
++            any_matched = any(
++                status == "matched"
++                for status in (product_status, pkg_status, upc_status, brand_status)
++            )
++            if any_matched:
++                match_level = "partial"
++                reasons.append("lot_unknown_partial_candidate")
++            else:
++                match_level = "no_match"
++
++    diagnostics = MatchDiagnostics(
++        normalized_recall_upcs=norm_rec_upcs,
++        normalized_inventory_upc=norm_inv_upc,
++        normalized_recall_packages=norm_rec_pkgs,
++        normalized_inventory_package=norm_inv_pkg,
++        matched_lot_value=matched_lot,
++        reason_codes=tuple(reasons),
++    )
++
++    return InventoryMatch(
++        item_id=inventory_row.item_id,
++        lot=lot_status,
++        brand=brand_status,
++        product_name=product_status,
++        package_size=pkg_status,
++        upc=upc_status,
++        match_status=match_level,
++        diagnostics=diagnostics,
++    )
+diff --git a/inventory_store.py b/inventory_store.py
+new file mode 100644
+index 0000000..6c4d0bc
+--- /dev/null
++++ b/inventory_store.py
+@@ -0,0 +1,364 @@
++"""Read-only SQLite store for synthetic retailer inventory.
++
++Opens in URI mode=ro with PRAGMA query_only=ON. Never uses synthetic_generation_note
++or item_id suffix (-A/-B) as a matching oracle. Candidate discovery via vector/Qdrant
++IDs must resolve through this authoritative SQLite database.
++"""
++
++from pathlib import Path
++import re
++import sqlite3
++
++from inventory_loader import INVENTORY_COLUMNS
++from models import Nonblank, StrictModel
++from pydantic import Field
++
++
++class InventoryStoreError(ValueError):
++    """The retailer inventory SQLite database is unavailable or invalid."""
++
++
++class InventorySchemaError(InventoryStoreError):
++    """The retailer inventory SQLite schema or manifest does not match contract."""
++
++
++class InventoryRow(StrictModel):
++    inventory_set_id: Nonblank
++    item_id: Nonblank
++    retailer_id: Nonblank
++    store_id: Nonblank
++    product_label: str
++    brand: str
++    upc: str
++    lot_code: str
++    package_size: str
++    simulated_quantity: int = Field(ge=0)
++    quantity_unit: Nonblank
++    inventory_reference_date: Nonblank
++    source_type: Nonblank
++    synthetic_generation_note: str
++
++
++def _normalize_upc_digits(value: str | None) -> str | None:
++    if not value:
++        return None
++    cleaned = re.sub(r"[\s\-]+", "", value)
++    if cleaned and cleaned.isdigit():
++        return cleaned
++    return None
++
++
++def _parse_package_value_unit(value: str | None) -> tuple[float, str] | None:
++    if not value or not value.strip():
++        return None
++    match = re.fullmatch(
++        r"\s*(\d+(?:\.\d+)?)\s*(oz|ounces?|lb|lbs|pounds?|g|grams?|kg|kilograms?|gallons?|gal)\.?\s*",
++        value,
++        re.IGNORECASE,
++    )
++    if not match:
++        return None
++    num = float(match.group(1))
++    raw_unit = match.group(2).lower()
++    unit_map = {
++        "oz": "oz",
++        "ounce": "oz",
++        "ounces": "oz",
++        "lb": "lb",
++        "lbs": "lb",
++        "pound": "lb",
++        "pounds": "lb",
++        "g": "g",
++        "gram": "g",
++        "grams": "g",
++        "kg": "kg",
++        "kilogram": "kg",
++        "kilograms": "kg",
++        "gallon": "gallon",
++        "gallons": "gallon",
++        "gal": "gallon",
++    }
++    return (num, unit_map[raw_unit])
++
++
++# Bounded deterministic product name equivalence table between FDA product_description
++# substrings/canonical forms and retailer inventory product_label strings.
++APPROVED_PRODUCT_NAME_EQUIVALENCES: dict[str, tuple[str, ...]] = {
++    "donutful chocolate dipped vanilla cake donuts": ("donutful chocolate dipped vanilla cake donuts",),
++    "solina garlic cream sauce seasoning": ("solina 6036277 garlic cream sauce seasoning", "solina garlic cream sauce seasoning"),
++    "somebody's mother's island sauce": ("somebody's mother's island sauce",),
++    "atlantic salmon portions with seafood stuffing": ("atlantic salmon portions with seafood stuffing",),
++    "arepas la mejor sweet corn pancakes": (
++        "arepas la mejor, arepa de chocolo (chocolate sweet corn pancakes)",
++        "arepas la mejor sweet corn pancakes",
++    ),
++    "hillside orchard farms strawberry fritter": (
++        "strawberry fritter net wt 7oz (198g) contains: wheat, soybeans, milk. made by: hillside orchard farms",
++        "hillside orchard farms strawberry fritter",
++    ),
++    "hershey's green mint chip ice cream": (
++        "hershey s ice cream, green mint chip (gmc) bulk",
++        "hershey's green mint chip ice cream",
++    ),
++    "irvington seafood lump crab meat": ("irvington seafood lump crab meat",),
++    "baiwei shanzhuang dried seedless plum candy": (
++        "baiwei shanzhuang, dried seedless plum candy",
++        "baiwei shanzhuang dried seedless plum candy",
++    ),
++    "southern belle seafood crabmeat stuffing": ("southern belle seafood crabmeat stuffing",),
++    "brie royal faucon": ("brie royal faucon",),
++    "blum's dried shrimp": ("blum's shrimp shred dried shrimp", "blum's dried shrimp"),
++    "wilbur dark chocolate covered cashews": (
++        "wilbur¿ dark chocolate covered cashews",
++        "wilbur dark chocolate covered cashews",
++    ),
++    "vegan peanut butter jam cookie": (
++        "gluten free vegan peanut butter jam cookie",
++        "vegan peanut butter jam cookie",
++    ),
++    "fullei fresh alfalfa sprouts": (
++        "fullei fresh brand alfalfa sprouts",
++        "fullei fresh alfalfa sprouts",
++    ),
++    "vegetarian pia cake mung bean pumpkin": ("vegetarian pia cake mung bean pumpkin",),
++    "tandoori peanut spread": ("tandoori peanut spread",),
++    "cravings chocolate chunk cookie mix": (
++        "the perfect chocolate chunk cookie mix cravings by chrissy teigen",
++        "cravings chocolate chunk cookie mix",
++    ),
++    "smoked wahoo dip": ("smoked wahoo dip",),
++    "queso de mano fresh white cheese": (
++        "queso de mano, fresh soft white cheese",
++        "queso de mano fresh white cheese",
++    ),
++    "cricket creek farm feta cheese": (
++        "cricket creek farm brand feta cheese",
++        "cricket creek farm feta cheese",
++    ),
++    "jack and the green sprouts alfalfa sprouts": (
++        "jack & the green sprouts alfalfa sprouts",
++        "jack and the green sprouts alfalfa sprouts",
++    ),
++    "fresh direct dark chocolate pretzels": ("fresh direct dark chocolate pretzels",),
++    "swad cinnamon powder": ("swad brand cinnamon powder", "swad cinnamon powder"),
++    "ginger snap milk chocolate": ("ginger snap milk chocolate",),
++    "volupta organic black chia seeds": ("volupta organic black chia seeds",),
++    "alpha steakless ranchero burrito": (
++        "alpha plant-based burrito - steakless ranchero",
++        "alpha steakless ranchero burrito",
++    ),
++    "hinterland mango habanero farmstead cheese": (
++        "hinterland dairy farmstead cheese mango habanero",
++        "hinterland mango habanero farmstead cheese",
++    ),
++    "chuao potato chip mini chocolate bar": (
++        "chuao chocolatier potato chip mini chocolate bar",
++        "chuao potato chip mini chocolate bar",
++    ),
++    "asli cinnamon powder": ("asli cinnamon powder",),
++    "bettergoods pistachio nut butter": (
++        "bettergoods brand pistachio nut butter",
++        "bettergoods pistachio nut butter",
++    ),
++    "popping topping sour cream and onion popcorn seasoning": (
++        "popping topping, sour cream & onion flavored popcorn seasoning",
++        "popping topping sour cream and onion popcorn seasoning",
++    ),
++    "mon sire brie cheese": ("mon sire brie, soft-ripened french cheese", "mon sire brie", "mon sire brie cheese"),
++    "todd's seeds alfalfa sprouting seeds": ("todd's seeds alfalfa sprouting seeds",),
++    "taylor farms salsa roja medium": ("salsa roja medium", "taylor farms salsa roja medium"),
++    "jk patisserie croissant": ("croissant; packaged in cardboard box", "jk patisserie croissant"),
++    "bettergoods lemon alfredo fettuccine": ("lemon alfredo fettuccine", "bettergoods lemon alfredo fettuccine"),
++    "annie's rising crust four cheese pizza": (
++        "annie's homegrown rising crust four cheese pizza",
++        "annie's rising crust four cheese pizza",
++    ),
++    "country fresh ovens cheese coffee cake": ("country fresh ovens cheese coffee cake",),
++    "little salad bar asian chopped salad kit": ("little salad bar asian chopped salad kit",),
++    "betty crocker super moist carrot cake mix": (
++        "betty crocker delights super moist carrot cake mix",
++        "betty crocker super moist carrot cake mix",
++    ),
++    "tastykake chocolate creme filled cupcakes": ("tastykake chocolate creme filled cupcakes",),
++    "veggie pizza": ("veggie pizza sold under the following brands", "veggie pizza"),
++    "full tilt vanilla bean ice cream": ("vanilla bean, full tilt ice cream", "full tilt vanilla bean ice cream"),
++    "bundle organics salty nuts and seeds bar": (
++        "bundle organics bar salty nuts and seeds",
++        "bundle organics salty nuts and seeds bar",
++    ),
++    "blueberry greek yogurt bar": ("blueberry greek yogurt bar",),
++    "gomacro coconut almond butter chocolate chip macrobar": (
++        "go macro macrobar, coconut + almond butter + chocolate chips",
++        "gomacro coconut almond butter chocolate chip macrobar",
++    ),
++    "reny picot brie with peppercorn": ("reny picot", "reny picot brie with peppercorn"),
++}
++
++
++def deterministic_product_name_matches(fda_product_name: str | None, inventory_label: str | None) -> bool:
++    """Return True if fda_product_name and inventory_label match deterministically."""
++    if not fda_product_name or not fda_product_name.strip() or not inventory_label or not inventory_label.strip():
++        return False
++    fda_norm = " ".join(fda_product_name.strip().lower().split())
++    inv_norm = " ".join(inventory_label.strip().lower().split())
++    if fda_norm == inv_norm:
++        return True
++    if fda_norm.startswith(inv_norm):
++        return True
++    variants = APPROVED_PRODUCT_NAME_EQUIVALENCES.get(inv_norm, ())
++    for variant in variants:
++        if variant in fda_norm:
++            return True
++    return False
++
++
++class InventoryStore:
++    """Read-only SQLite wrapper for authoritative retailer inventory."""
++
++    def __init__(self, path: Path) -> None:
++        try:
++            resolved = Path(path).resolve(strict=True)
++            self._db = sqlite3.connect(resolved.as_uri() + "?mode=ro", uri=True)
++        except Exception as exc:
++            raise InventoryStoreError("Inventory SQLite database is unavailable") from exc
++        try:
++            self._db.row_factory = sqlite3.Row
++            self._db.execute("PRAGMA query_only=ON")
++            table_info = self._db.execute("PRAGMA table_info(inventory)").fetchall()
++            cols = tuple(row["name"] for row in table_info)
++            if cols != INVENTORY_COLUMNS:
++                raise InventorySchemaError("Inventory table columns differ from approved contract")
++            manifest = self._db.execute("SELECT * FROM manifest").fetchall()
++            if len(manifest) != 1 or manifest[0]["synthetic"] != 1:
++                raise InventorySchemaError("Invalid or missing inventory manifest")
++            self.snapshot_id: str = manifest[0]["reference_snapshot_id"]
++            self.source_sha256: str = manifest[0]["source_sha256"]
++            self.set_count: int = manifest[0]["set_count"]
++            self.record_count: int = manifest[0]["record_count"]
++            actual_count = self._db.execute("SELECT count(*) FROM inventory").fetchone()[0]
++            if actual_count != self.record_count:
++                raise InventorySchemaError("Inventory row count differs from manifest")
++        except InventoryStoreError:
++            self._db.close()
++            raise
++        except Exception as exc:
++            self._db.close()
++            raise InventorySchemaError("Invalid inventory database schema") from exc
++
++    def close(self) -> None:
++        self._db.close()
++
++    def __enter__(self):
++        return self
++
++    def __exit__(self, *_):
++        self.close()
++
++    def _row_to_model(self, row: sqlite3.Row) -> InventoryRow:
++        return InventoryRow.model_validate({col: row[col] for col in INVENTORY_COLUMNS})
++
++    def resolve_candidate_ids(self, candidate_item_ids: tuple[str, ...]) -> list[InventoryRow]:
++        """Re-query candidate item IDs (e.g. from Qdrant) against authoritative SQLite.
++
++        Any candidate ID absent from SQLite is rejected/excluded.
++        """
++        if not candidate_item_ids:
++            return []
++        try:
++            results: list[InventoryRow] = []
++            seen: set[str] = set()
++            for item_id in candidate_item_ids:
++                if not isinstance(item_id, str) or item_id in seen:
++                    continue
++                seen.add(item_id)
++                row = self._db.execute(
++                    "SELECT * FROM inventory WHERE item_id = ?", (item_id,)
++                ).fetchone()
++                if row is not None:
++                    results.append(self._row_to_model(row))
++            return results
++        except Exception as exc:
++            raise InventoryStoreError("SQLite read failure during candidate ID resolution") from exc
++
++    def _select(self, where: str, params: tuple, id_filter: tuple[str, ...] | None) -> list[InventoryRow]:
++        """Run one parameterized SELECT; `where` is always a constant fragment."""
++        sql = "SELECT * FROM inventory WHERE (" + where + ")"
++        args = list(params)
++        if id_filter is not None:
++            sql += " AND item_id IN (" + ",".join("?" * len(id_filter)) + ")"
++            args.extend(id_filter)
++        sql += " ORDER BY item_id"
++        return [self._row_to_model(r) for r in self._db.execute(sql, args).fetchall()]
++
++    def find_inventory_candidates(
++        self,
++        brand: str | None,
++        product_name: str | None,
++        lot_numbers: tuple[str, ...],
++        package_sizes: tuple[str, ...],
++        *,
++        upcs: tuple[str, ...] = (),
++        candidate_item_ids: tuple[str, ...] | None = None,
++    ) -> list[InventoryRow]:
++        """Discover candidate rows with SQLite filters in literal priority order:
++        1. Exact UPC digits (only rows with an explicit UPC)
++        2. Exact lot code (binary comparison: leading zeros and case preserved)
++        3. Exact/approved-deterministic product label, else package size
++        4. Brand, only when nothing else matched
++        Never reads synthetic_generation_note or the -A/-B item suffix. When
++        candidate_item_ids (e.g. from a vector index) is given, results are
++        restricted to IDs that exist in SQLite; absent IDs are dropped.
++        The deterministic matcher remains the final authority.
++        """
++        ids: tuple[str, ...] | None = None
++        if candidate_item_ids is not None:
++            ids = tuple(dict.fromkeys(i for i in candidate_item_ids if isinstance(i, str)))
++            if not ids:
++                return []
++        norm_upcs = sorted({d for u in upcs if (d := _normalize_upc_digits(u)) is not None})
++        exact_lots = sorted({lot for lot in lot_numbers if isinstance(lot, str) and lot != ""})
++        parsed_pkgs = {p for s in package_sizes if (p := _parse_package_value_unit(s)) is not None}
++        raw_pkgs = {s.strip().lower() for s in package_sizes if s and s.strip()}
++        norm_brand = brand.strip().lower() if brand and brand.strip() else None
++
++        candidates: list[InventoryRow] = []
++        seen: set[str] = set()
++
++        def add(rows: list[InventoryRow]) -> None:
++            for r in rows:
++                if r.item_id not in seen:
++                    seen.add(r.item_id)
++                    candidates.append(r)
++
++        try:
++            if norm_upcs:
++                add(self._select(
++                    "upc != '' AND REPLACE(REPLACE(upc, ' ', ''), '-', '') IN ("
++                    + ",".join("?" * len(norm_upcs)) + ")", tuple(norm_upcs), ids))
++            if exact_lots:
++                add(self._select(
++                    "lot_code != '' AND lot_code IN (" + ",".join("?" * len(exact_lots)) + ")",
++                    tuple(exact_lots), ids))
++            if product_name and product_name.strip():
++                labels = [r[0] for r in self._db.execute(
++                    "SELECT DISTINCT product_label FROM inventory WHERE product_label != ''")]
++                hit = [l for l in labels if deterministic_product_name_matches(product_name, l)]
++                if hit:
++                    add(self._select("product_label IN (" + ",".join("?" * len(hit)) + ")",
++                                     tuple(hit), ids))
++            elif parsed_pkgs or raw_pkgs:
++                sizes = [r[0] for r in self._db.execute(
++                    "SELECT DISTINCT package_size FROM inventory WHERE package_size != ''")]
++                hit = [s for s in sizes
++                       if _parse_package_value_unit(s) in parsed_pkgs
++                       or s.strip().lower() in raw_pkgs]
++                if hit:
++                    add(self._select("package_size IN (" + ",".join("?" * len(hit)) + ")",
++                                     tuple(hit), ids))
++            if not candidates and norm_brand is not None:
++                add(self._select("brand != '' AND LOWER(TRIM(brand)) = ?", (norm_brand,), ids))
++        except InventoryStoreError:
++            raise
++        except Exception as exc:
++            raise InventoryStoreError("SQLite read failure during inventory lookup") from exc
++        return candidates
+diff --git a/tests/test_a2_agent.py b/tests/test_a2_agent.py
+new file mode 100644
+index 0000000..60b61b3
+--- /dev/null
++++ b/tests/test_a2_agent.py
+@@ -0,0 +1,396 @@
++"""Acceptance tests for a2_agent.py (Items 1, 8-15, 18-21, 29, 30)."""
++
++from pathlib import Path
++import sqlite3
++import tempfile
++import unittest
++
++from a1_run import A1RunEnvelope, RunError
++from a1_trace import RunTrace
++from a2_agent import A2RunEnvelope, InventoryFinding, run_a2
++from group_c_contract import GroupCResult, RelationPart, SourceRelation
++from inventory_loader import DEFAULT_INVENTORY_JSON, build_inventory_store
++from inventory_store import InventoryStore
++from models import A1Result, Facts, Identifier, SourceField, SourceFields
++from pydantic import ValidationError
++
++
++SNAPSHOT = "FDA-FOOD-2026-10-23-USER-SNAPSHOT"
++DUMMY_UUID = "50b6bb65-921a-55ed-8d00-4f5f56962cc7"
++
++
++def _make_trace(recall_number: str = "H-0011-2027", event_id: str = "99686") -> RunTrace:
++    return RunTrace(
++        recall_number=recall_number,
++        snapshot_id=SNAPSHOT,
++        event_id=event_id,
++        collection="recallready_fda_food_a1_v1",
++        embedding_model="sentence-transformers/all-minilm-l6-v2",
++        max_output_tokens=4000,
++        started_utc="2026-11-20T00:00:00+00:00",
++        completed_utc="2026-11-20T00:00:01+00:00",
++    )
++
++
++def _make_source_fields(recall_number: str, product_text: str, code_text: str) -> SourceFields:
++    return SourceFields(
++        product_description=SourceField(
++            original_text=product_text,
++            evidence_id=f"EV-{recall_number}-PRODUCT_DESCRIPTION",
++            point_id=DUMMY_UUID,
++        ),
++        code_info=SourceField(
++            original_text=code_text,
++            evidence_id=f"EV-{recall_number}-CODE_INFO",
++            point_id=DUMMY_UUID,
++        ),
++        reason_for_recall=SourceField(
++            original_text="Undeclared allergen",
++            evidence_id=f"EV-{recall_number}-REASON_FOR_RECALL",
++            point_id=DUMMY_UUID,
++        ),
++        distribution_pattern=SourceField(
++            original_text="Nationwide",
++            evidence_id=f"EV-{recall_number}-DISTRIBUTION_PATTERN",
++            point_id=DUMMY_UUID,
++        ),
++        recalling_firm=SourceField(
++            original_text="Test Firm",
++            evidence_id=None,
++            point_id=None,
++        ),
++        classification=SourceField(
++            original_text="Class I",
++            evidence_id=None,
++            point_id=None,
++        ),
++    )
++
++
++def _make_a1_envelope(
++    *,
++    run_id: str = "run-001",
++    recall_number: str = "H-0011-2027",
++    event_id: str = "99686",
++    product_name: str = "Donutful Chocolate Dipped Vanilla Cake Donuts - 7.05oz/10ct. UPC 850041392103.",
++    code_info: str = "Lot # 26078 BEST BY: 09/15/2026",
++    identifiers: list[Identifier] | None = None,
++    uncertainties: list[str] | None = None,
++) -> A1RunEnvelope:
++    ev_ids = [
++        f"EV-{recall_number}-PRODUCT_DESCRIPTION",
++        f"EV-{recall_number}-CODE_INFO",
++        f"EV-{recall_number}-REASON_FOR_RECALL",
++        f"EV-{recall_number}-DISTRIBUTION_PATTERN",
++    ]
++    if identifiers is None:
++        identifiers = [
++            Identifier(
++                kind="lot",
++                value="26078",
++                scope_note=code_info,
++                evidence_ids=[f"EV-{recall_number}-CODE_INFO"],
++            ),
++            Identifier(
++                kind="upc",
++                value="850041392103",
++                scope_note=product_name,
++                evidence_ids=[f"EV-{recall_number}-PRODUCT_DESCRIPTION"],
++            ),
++        ]
++    a1_result = A1Result(
++        contract_version="0.1-proposed",
++        snapshot_id=SNAPSHOT,
++        event_id=event_id,
++        facts=Facts(
++            recall_number=recall_number,
++            product_name=product_name,
++            recalling_firm="Test Firm",
++            recall_reason="Undeclared allergen",
++            classification="Class I",
++            identifiers=identifiers,
++            uncertainties=uncertainties or [],
++            evidence_ids=ev_ids,
++        ),
++        source_fields=_make_source_fields(recall_number, product_name, code_info),
++    )
++    return A1RunEnvelope(
++        run_id=run_id,
++        status="validated",
++        result=a1_result,
++        error=None,
++        trace=_make_trace(recall_number, event_id),
++    )
++
++
++class TestA2Agent(unittest.TestCase):
++    @classmethod
++    def setUpClass(cls) -> None:
++        cls._tmp = tempfile.TemporaryDirectory()
++        cls.db_path = Path(cls._tmp.name) / "inventory.sqlite"
++        build_inventory_store(cls.db_path, json_path=DEFAULT_INVENTORY_JSON)
++
++    @classmethod
++    def tearDownClass(cls) -> None:
++        cls._tmp.cleanup()
++
++    def test_exact_match_preserves_quantity_store_and_original_text(self) -> None:
++        """Items 1, 19, 30: Validated A1 envelope + exact match preserves quantity, store, date, and original strings."""
++        envelope = _make_a1_envelope()
++        with InventoryStore(self.db_path) as store:
++            a2 = run_a2(store, envelope, case_id="case-001", run_id="run-001")
++        self.assertEqual(a2.status, "matched")
++        self.assertIsNone(a2.error)
++        self.assertFalse(a2.requires_human_review)
++        self.assertEqual(len(a2.findings), 1)
++        f = a2.findings[0]
++        self.assertEqual(f.item_id, "INV-001-A")
++        self.assertEqual(f.match_status, "exact")
++        self.assertEqual(f.simulated_quantity, 12)
++        self.assertEqual(f.store_id, "SIM-STORE-02")
++        self.assertEqual(f.inventory_reference_date, "2026-08-17")
++        self.assertEqual(f.package_size, "7.05oz")
++        self.assertEqual(f.lot_code, "26078")
++        self.assertEqual(f.upc, "850041392103")
++        self.assertEqual(f.brand, "")
++        self.assertEqual(f.brand_match, "unknown")
++
++    def test_multiple_matching_rows_preserved_separately(self) -> None:
++        """Item 8: Multiple matching inventory rows and quantities are never merged."""
++        from contextlib import closing
++
++        multi_db = Path(self._tmp.name) / "multi.sqlite"
++        build_inventory_store(multi_db, json_path=DEFAULT_INVENTORY_JSON)
++        # Add a second matching row in a separate store location
++        with closing(sqlite3.connect(multi_db)) as db:
++            with db:
++                db.execute("UPDATE manifest SET record_count = 97")
++                db.execute(
++                    """
++                    INSERT INTO inventory VALUES (
++                        'SIMSET-001', 'INV-001-A2', 'SIM-RETAILER-01', 'SIM-STORE-09',
++                        'Donutful Chocolate Dipped Vanilla Cake Donuts', '', '850041392103',
++                        '26078', '7.05oz', 44, 'packages', '2026-08-18', 'SYNTHETIC', 'Second store stock'
++                    )
++                    """
++                )
++        envelope = _make_a1_envelope()
++        with InventoryStore(multi_db) as store:
++            a2 = run_a2(store, envelope, case_id="case-multi", run_id="run-001")
++        self.assertEqual(a2.status, "matched")
++        self.assertEqual(len(a2.findings), 2)
++        quantities = {f.item_id: (f.simulated_quantity, f.store_id) for f in a2.findings}
++        self.assertEqual(quantities["INV-001-A"], (12, "SIM-STORE-02"))
++        self.assertEqual(quantities["INV-001-A2"], (44, "SIM-STORE-09"))
++
++    def test_no_inventory_match_returns_no_match_status_not_error(self) -> None:
++        """Items 3, 9, 20: Explicit lot mismatch returns no_match with empty findings and no error."""
++        # F-0818-2023 has lot US3-12 in FDA recall, while INV-017-A has lot US3-11
++        prod = "Tandoori Peanut Spread; Net. Wt 11.29  oz PetJar; packed in cases consisting of 12 Jars per case"
++        code = "UPC Code 8904067712635 Lot # US3-12"
++        envelope = _make_a1_envelope(
++            recall_number="F-0818-2023",
++            event_id="92067",
++            product_name=prod,
++            code_info=code,
++            identifiers=[
++                Identifier(
++                    kind="lot",
++                    value="US3-12",
++                    scope_note=code,
++                    evidence_ids=["EV-F-0818-2023-CODE_INFO"],
++                ),
++                Identifier(
++                    kind="upc",
++                    value="8904067712635",
++                    scope_note=code,
++                    evidence_ids=["EV-F-0818-2023-CODE_INFO"],
++                ),
++            ],
++        )
++        with InventoryStore(self.db_path) as store:
++            a2 = run_a2(store, envelope, case_id="case-nomatch", run_id="run-001")
++        self.assertEqual(a2.status, "no_match")
++        self.assertEqual(a2.findings, [])
++        self.assertIsNone(a2.error)
++
++    def test_group_c_explicit_lot_date_relation_and_package_lot_ambiguity(self) -> None:
++        """Items 10, 11, 21: Group C lot/date relation matched only from explicit relation; package/lot ambiguity stays unresolved."""
++        # H-1388-2026: Mon Sire Brie, 1 kg, LOT 00000ZRAA1 EXP 08/15/2026
++        prod = "Mon Sire Brie, soft-ripened French cheese, 1 kg"
++        code = "LOT 00000ZRAA1  EXP 08/15/2026 LOT 00000ZUAD2  EXP 08/18/2026"
++        base_env = _make_a1_envelope(
++            recall_number="H-1388-2026",
++            event_id="99841",
++            product_name=prod,
++            code_info=code,
++            identifiers=[],
++            uncertainties=["Group C relationship requires human review."],
++        )
++        group_c = GroupCResult(
++            contract_version="0.2-group-c-provisional",
++            base=base_env.result,
++            relations=[
++                SourceRelation(
++                    kind="lot_date",
++                    evidence_id="EV-H-1388-2026-CODE_INFO",
++                    start=0,
++                    end=30,
++                    source_span="LOT 00000ZRAA1  EXP 08/15/2026",
++                    parts=[
++                        RelationPart(role="lot", value="00000ZRAA1"),
++                        RelationPart(role="date", value="08/15/2026"),
++                    ],
++                )
++            ],
++        )
++        gc_env = A1RunEnvelope(
++            run_id="run-gc",
++            status="validated",
++            result=group_c,
++            error=None,
++            trace=_make_trace("H-1388-2026", "99841"),
++        )
++        with InventoryStore(self.db_path) as store:
++            # Default route stops Group C before inventory match unless approved route enabled
++            stopped = run_a2(store, gc_env, case_id="case-gc-stop")
++            self.assertEqual(stopped.status, "unresolved")
++            self.assertEqual(stopped.error.code, "ambiguous_recall_scope")
++
++            # When approved route enabled, INV-033-A (which has lot_code='') is excluded unless lot or UPC matches;
++            # if a row in inventory matches the explicit Group C lot_date lot 00000ZRAA1, it is returned as partial
++            # (preserving Group C review uncertainty).
++            from contextlib import closing
++
++            gc_db = Path(self._tmp.name) / "gc_match.sqlite"
++            build_inventory_store(gc_db, json_path=DEFAULT_INVENTORY_JSON)
++            with closing(sqlite3.connect(gc_db)) as db:
++                with db:
++                    db.execute(
++                        "UPDATE inventory SET lot_code = '00000ZRAA1' WHERE item_id = 'INV-033-A'"
++                    )
++            with InventoryStore(gc_db) as gc_store:
++                resumed = run_a2(gc_store, gc_env, case_id="case-gc-resume", allow_group_c_or_uncertain=True)
++            self.assertEqual(resumed.status, "partial")
++            self.assertTrue(resumed.requires_human_review)
++            self.assertEqual(len(resumed.findings), 1)
++            self.assertEqual(resumed.findings[0].item_id, "INV-033-A")
++            self.assertEqual(resumed.findings[0].match_status, "partial")
++            self.assertEqual(resumed.findings[0].lot_match, "matched")
++            self.assertIn("00000ZRAA1", resumed.findings[0].a1_identifier_values)
++
++        # Item 11 & 21: Group C with multiple package sizes and multiple lots (F-2413-2017) -> ambiguous_recall_scope
++        prod_multi = "go macro MACROBAR, 1. Net Wt 0.9 oz / 25 G minbar and 2. net Wt 2.3 oz / 65 G"
++        code_multi = "3516 / 1/3/2018, 3537 / 1/16/2018"
++        base_multi = _make_a1_envelope(
++            recall_number="F-2413-2017",
++            event_id="77557",
++            product_name=prod_multi,
++            code_info=code_multi,
++            identifiers=[],
++            uncertainties=["Multi-size lot relationship ambiguous"],
++        )
++        gc_multi = GroupCResult(
++            contract_version="0.2-group-c-provisional",
++            base=base_multi.result,
++            relations=[
++                SourceRelation(
++                    kind="lot_date",
++                    evidence_id="EV-F-2413-2017-CODE_INFO",
++                    start=0,
++                    end=15,
++                    source_span="3516 / 1/3/2018",
++                    parts=[
++                        RelationPart(role="lot", value="3516"),
++                        RelationPart(role="date", value="1/3/2018"),
++                    ],
++                ),
++                SourceRelation(
++                    kind="lot_date",
++                    evidence_id="EV-F-2413-2017-CODE_INFO",
++                    start=17,
++                    end=33,
++                    source_span="3537 / 1/16/2018",
++                    parts=[
++                        RelationPart(role="lot", value="3537"),
++                        RelationPart(role="date", value="1/16/2018"),
++                    ],
++                ),
++            ],
++        )
++        gc_multi_env = A1RunEnvelope(
++            run_id="run-gc-multi",
++            status="validated",
++            result=gc_multi,
++            error=None,
++            trace=_make_trace("F-2413-2017", "77557"),
++        )
++        with InventoryStore(self.db_path) as store:
++            ambig = run_a2(store, gc_multi_env, case_id="case-ambig", allow_group_c_or_uncertain=True)
++            self.assertEqual(ambig.status, "unresolved")
++            self.assertEqual(ambig.error.code, "ambiguous_recall_scope")
++
++    def test_a1_unresolved_does_not_call_inventory_or_produce_findings(self) -> None:
++        """Item 12: A1 unresolved status returns unresolved with a1_unresolved and no findings."""
++        unresolved_env = A1RunEnvelope(
++            run_id="run-unres",
++            status="unresolved",
++            result=None,
++            error=RunError(
++                stage="interpretation",
++                code="provider_failure",
++                message="A1 failed",
++                request_state="not_sent",
++            ),
++            trace=_make_trace(),
++        )
++        with InventoryStore(self.db_path) as store:
++            a2 = run_a2(store, unresolved_env, case_id="case-unres")
++        self.assertEqual(a2.status, "unresolved")
++        self.assertEqual(a2.error.code, "a1_unresolved")
++        self.assertEqual(a2.findings, [])
++
++    def test_context_mismatch_rejected(self) -> None:
++        """Item 13: Recall/snapshot/event/run_id mismatch rejected."""
++        envelope = _make_a1_envelope()
++        with InventoryStore(self.db_path) as store:
++            a2_recall = run_a2(store, envelope, recall_number="F-1542-2023")
++            self.assertEqual(a2_recall.status, "unresolved")
++            self.assertEqual(a2_recall.error.code, "a1_context_mismatch")
++
++            a2_snap = run_a2(store, envelope, snapshot_id="WRONG-SNAPSHOT")
++            self.assertEqual(a2_snap.status, "unresolved")
++            self.assertEqual(a2_snap.error.code, "a1_context_mismatch")
++
++            a2_event = run_a2(store, envelope, event_id="00000")
++            self.assertEqual(a2_event.status, "unresolved")
++            self.assertEqual(a2_event.error.code, "a1_context_mismatch")
++
++    def test_sqlite_unavailable_differs_from_no_match(self) -> None:
++        """Items 14, 20: Inventory SQLite failure is a typed unresolved outcome, never no_match."""
++        envelope = _make_a1_envelope()
++        store = InventoryStore(self.db_path)
++        store.close()  # Simulate closed/unavailable database connection
++        a2 = run_a2(store, envelope, case_id="case-closed")
++        self.assertEqual(a2.status, "unresolved")
++        self.assertEqual(a2.error.code, "inventory_store_unavailable")
++        self.assertNotEqual(a2.status, "no_match")
++
++    def test_strict_pydantic_output_rejects_extra_fields(self) -> None:
++        """Item 15: Strict Pydantic output rejects extra fields on InventoryFinding and A2RunEnvelope."""
++        envelope = _make_a1_envelope()
++        with InventoryStore(self.db_path) as store:
++            a2 = run_a2(store, envelope, case_id="case-strict")
++        finding_dict = a2.findings[0].model_dump()
++        finding_dict["recommended_action"] = "quarantine"
++        with self.assertRaises(ValidationError):
++            InventoryFinding.model_validate(finding_dict)
++
++        env_dict = a2.model_dump()
++        env_dict["extra_field"] = "forbidden"
++        with self.assertRaises(ValidationError):
++            A2RunEnvelope.model_validate(env_dict)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/test_a2_review_fixes.py b/tests/test_a2_review_fixes.py
+new file mode 100644
+index 0000000..a12b9ce
+--- /dev/null
++++ b/tests/test_a2_review_fixes.py
+@@ -0,0 +1,122 @@
++"""Regression tests for code-review fixes (batch, Group C relations, SQL lookup, reasons)."""
++
++import ast
++from pathlib import Path
++import tempfile
++import unittest
++
++from a1_run import A1RunEnvelope
++from a2_agent import _extract_a1_scope, run_a2
++from group_c_contract import GroupCResult, RelationPart, SourceRelation
++from inventory_loader import DEFAULT_INVENTORY_JSON, build_inventory_store
++from inventory_match import RecallInventoryScope, compare_recall_to_inventory
++from inventory_store import InventoryRow, InventoryStore
++from models import Identifier
++from test_a2_agent import _make_a1_envelope, _make_trace
++
++
++def _batch_envelope(value: str) -> A1RunEnvelope:
++    code = f"Batch #{value}"
++    return _make_a1_envelope(
++        recall_number="F-0882-2023", event_id="92215",
++        product_name="Smoked Wahoo Dip, Net Wt. 8oz", code_info=code,
++        identifiers=[Identifier(kind="batch", value=value, scope_note=code,
++                                evidence_ids=["EV-F-0882-2023-CODE_INFO"])],
++    )
++
++
++class TestReviewFixes(unittest.TestCase):
++    @classmethod
++    def setUpClass(cls) -> None:
++        cls._tmp = tempfile.TemporaryDirectory()
++        cls.db = Path(cls._tmp.name) / "inv.sqlite"
++        build_inventory_store(cls.db, json_path=DEFAULT_INVENTORY_JSON)
++
++    @classmethod
++    def tearDownClass(cls) -> None:
++        cls._tmp.cleanup()
++
++    def test_batch_identifier_is_compared_to_lot_code(self) -> None:
++        with InventoryStore(self.db) as store:
++            # Real fixture: recall batch 2-401 vs inventory 2-402 -> explicit mismatch.
++            self.assertEqual(run_a2(store, _batch_envelope("2-401")).status, "no_match")
++            out = run_a2(store, _batch_envelope("2-402"))
++        self.assertEqual(out.status, "matched")
++        self.assertIn("lot_source:batch_identifier:2-402", out.findings[0].reason_codes)
++
++    def test_group_c_lots_come_only_from_relations(self) -> None:
++        base = _make_a1_envelope(
++            recall_number="H-1361-2026", event_id="99611",
++            product_name="Salsa Roja Medium. Net Wt: 12 oz.", code_info="Illinois: TFIC207, 8/7/2026",
++            identifiers=[Identifier(kind="lot", value="IGNORED1", scope_note="x",
++                                    evidence_ids=["EV-H-1361-2026-CODE_INFO"])],
++            uncertainties=["review"],
++        ).result
++
++        def rel(kind, parts):
++            return SourceRelation(kind=kind, evidence_id="EV-H-1361-2026-CODE_INFO", start=0, end=5,
++                                  source_span="abcde", parts=[RelationPart(role=r, value=v) for r, v in parts])
++
++        gc = GroupCResult(contract_version="0.2-group-c-provisional", base=base, relations=[
++            rel("state_code_date", [("state", "Illinois"), ("code", "TFIC207"), ("date", "8/7/2026")]),
++            rel("code_date", [("code", "TFIC209"), ("date", "8/9/2026")]),
++            rel("date_range", [("range_start", "1/1/2026"), ("range_end", "2/1/2026")]),
++        ])
++        env = A1RunEnvelope(run_id="run-001", status="validated", result=gc, error=None,
++                            trace=_make_trace("H-1361-2026", "99611"))
++        scope, err, _ = _extract_a1_scope(env, case_id="c", run_id=None, recall_number=None,
++                                          snapshot_id=None, event_id=None)
++        self.assertIsNone(err)
++        self.assertEqual(scope.lot_numbers, ("TFIC207", "TFIC209"))
++        self.assertNotIn("IGNORED1", scope.lot_numbers)
++        notes = dict(scope.source_notes)
++        self.assertEqual(notes["TFIC207"], "lot_source:relation:state_code_date:Illinois:TFIC207|8/7/2026")
++        self.assertEqual(notes["TFIC209"], "lot_source:relation:code_date:TFIC209|8/9/2026")
++
++    def test_inventory_modules_import_no_llm_or_vector_clients(self) -> None:
++        for name in ("inventory_match.py", "inventory_store.py", "inventory_loader.py"):
++            tree = ast.parse((Path(__file__).resolve().parent.parent / name).read_text(encoding="utf-8"))
++            mods = {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module}
++            mods |= {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
++            for mod in mods:
++                self.assertFalse(mod.startswith(("openai", "qdrant", "a1_", "source")), (name, mod))
++
++    def test_sql_lookup_filters_in_sqlite(self) -> None:
++        with InventoryStore(self.db) as store:
++            self.assertEqual([r.item_id for r in store.find_inventory_candidates(None, None, ("26078",), ())],
++                             ["INV-001-A"])
++            self.assertEqual([r.item_id for r in store.find_inventory_candidates(None, None, (), (), upcs=("8500 41392103",))],
++                             ["INV-001-A"])
++            self.assertEqual(store.find_inventory_candidates(None, None, ("26078",), (), candidate_item_ids=()), [])
++            self.assertEqual(store.find_inventory_candidates(None, None, ("26078",), (), candidate_item_ids=("INV-003-A",)), [])
++            self.assertEqual([r.item_id for r in store.find_inventory_candidates(None, None, ("060723",), ())],
++                             ["INV-003-A"])
++            self.assertEqual(store.find_inventory_candidates(None, None, ("60723",), ()), [])
++
++    def test_blank_inventory_package_stays_partial_with_reason(self) -> None:
++        scope = RecallInventoryScope(
++            recall_number="H-0011-2027", snapshot_id="S", event_id="1",
++            product_name="Donutful Chocolate Dipped Vanilla Cake Donuts 7.05oz",
++            lot_numbers=("26078",), package_sizes=("7.05oz",))
++        row = InventoryRow(inventory_set_id="S", item_id="X-A", retailer_id="r", store_id="s",
++                           product_label="Donutful Chocolate Dipped Vanilla Cake Donuts", brand="", upc="",
++                           lot_code="26078", package_size="", simulated_quantity=1, quantity_unit="packages",
++                           inventory_reference_date="2026-01-01", source_type="SYNTHETIC",
++                           synthetic_generation_note="")
++        m = compare_recall_to_inventory(scope, row)
++        self.assertEqual(m.match_status, "partial")
++        self.assertIn("secondary_unknown:package_size", m.diagnostics.reason_codes)
++
++    def test_duck_typed_store_and_missing_event(self) -> None:
++        class Fake:
++            snapshot_id = "FDA-FOOD-2026-10-23-USER-SNAPSHOT"
++
++            def find_inventory_candidates(self, **_):
++                return []
++
++        self.assertEqual(run_a2(Fake(), _make_a1_envelope()).status, "no_match")
++        self.assertEqual(run_a2(None, _make_a1_envelope()).error.code, "inventory_store_unavailable")
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/test_a3_agent.py b/tests/test_a3_agent.py
+new file mode 100644
+index 0000000..74351a9
+--- /dev/null
++++ b/tests/test_a3_agent.py
+@@ -0,0 +1,63 @@
++"""A3 contract tests using the actual A2 Pydantic model."""
++import pytest
++from a2_agent import A2RunEnvelope, InventoryFinding
++from a3_agent import plan_response
++
++BASE = dict(case_id="case-1", run_id="run-1", recall_number="R-1",
++            snapshot_id="snap-1", event_id="event-1")
++
++
++def finding(status, item="item-1", lot="matched"):
++    return InventoryFinding(
++        **BASE, inventory_set_id="SIMSET-001", item_id=item,
++        retailer_id="retailer-1", store_id="store-1", brand="Brand",
++        product_label="Product", package_size="12 oz", lot_code="LOT-1",
++        upc="012345678905", simulated_quantity=2, quantity_unit="units",
++        inventory_reference_date="2026-01-01", match_status=status,
++        lot_match=lot, brand_match="matched", product_name_match="matched",
++        package_size_match="matched", upc_match="unknown",
++        reason_codes=("deterministic_comparison",), a1_evidence_ids=["ev-1"],
++        requires_human_review=status == "partial")
++
++
++def test_exact_recommends_review_without_mutation():
++    a2 = A2RunEnvelope(**BASE, status="matched", findings=[finding("exact")])
++    a3 = plan_response(a2)
++    assert a3.status == "planned"
++    assert a3.suggested_actions[0].action_code == "REVIEW_ITEM"
++    assert a3.suggested_actions[0].evidence_ids == ["ev-1"]
++    assert a3.requires_human_review
++
++
++def test_partial_unknown_lot_requires_verification():
++    a2 = A2RunEnvelope(**BASE, status="partial", findings=[finding("partial", lot="unknown")],
++                       requires_human_review=True)
++    assert plan_response(a2).suggested_actions[0].action_code == "VERIFY_LOT"
++
++
++def test_partial_known_lot_requests_information():
++    a2 = A2RunEnvelope(**BASE, status="partial", findings=[finding("partial")],
++                       requires_human_review=True)
++    assert plan_response(a2).suggested_actions[0].action_code == "REQUEST_MORE_INFORMATION"
++
++
++def test_no_match_is_not_safety_clearance():
++    a2 = A2RunEnvelope(**BASE, status="no_match")
++    action = plan_response(a2).suggested_actions[0]
++    assert action.action_code == "RECORD_NO_DEMONSTRATED_MATCH"
++    assert action.item_id is None and action.evidence_ids == []
++    assert "not a safety clearance" in action.reason
++
++
++def test_unresolved_never_becomes_no_match():
++    from a2_agent import A2Error
++    a2 = A2RunEnvelope(**BASE, status="unresolved", error=A2Error(
++        code="ambiguous_recall_scope", message="Scope unclear"), requires_human_review=True)
++    a3 = plan_response(a2)
++    assert a3.status == "unresolved" and not a3.suggested_actions
++
++
++def test_duplicate_item_ids_are_rejected():
++    a2 = A2RunEnvelope(**BASE, status="matched", findings=[finding("exact"), finding("exact")])
++    with pytest.raises(ValueError, match="duplicate item_id"):
++        plan_response(a2)
+diff --git a/tests/test_inventory_loader.py b/tests/test_inventory_loader.py
+new file mode 100644
+index 0000000..ae69b47
+--- /dev/null
++++ b/tests/test_inventory_loader.py
+@@ -0,0 +1,85 @@
++"""Acceptance tests for inventory_loader.py (Items 22, 23, 30)."""
++
++from copy import deepcopy
++import json
++from pathlib import Path
++import sqlite3
++import tempfile
++import unittest
++
++from inventory_loader import (
++    DEFAULT_INVENTORY_JSON,
++    INVENTORY_COLUMNS,
++    InventoryLoadError,
++    build_inventory_store,
++)
++
++
++class TestInventoryLoader(unittest.TestCase):
++    def setUp(self) -> None:
++        self._tmp = tempfile.TemporaryDirectory()
++        self.tmp_dir = Path(self._tmp.name)
++
++    def tearDown(self) -> None:
++        self._tmp.cleanup()
++
++    def test_loads_exact_48_sets_and_96_rows_with_a_and_b_pairs(self) -> None:
++        """Items 22, 23, 30: Attached JSON loader creates 48 sets and 96 rows; 1 *-A and 1 *-B per set."""
++        db_path = self.tmp_dir / "retailer_inventory.sqlite"
++        build_inventory_store(db_path, json_path=DEFAULT_INVENTORY_JSON)
++        self.assertTrue(db_path.exists())
++
++        from contextlib import closing
++
++        with closing(sqlite3.connect(db_path)) as db:
++            db.row_factory = sqlite3.Row
++            manifest = db.execute("SELECT * FROM manifest").fetchone()
++            self.assertEqual(manifest["synthetic"], 1)
++            self.assertEqual(manifest["reference_snapshot_id"], "FDA-FOOD-2026-10-23-USER-SNAPSHOT")
++            self.assertEqual(manifest["set_count"], 48)
++            self.assertEqual(manifest["record_count"], 96)
++
++            rows = db.execute("SELECT * FROM inventory ORDER BY item_id").fetchall()
++            self.assertEqual(len(rows), 96)
++
++            sets: dict[str, list[str]] = {}
++            for r in rows:
++                self.assertEqual(tuple(r.keys()), INVENTORY_COLUMNS)
++                self.assertEqual(r["source_type"], "SYNTHETIC")
++                self.assertGreaterEqual(r["simulated_quantity"], 0)
++                sets.setdefault(r["inventory_set_id"], []).append(r["item_id"])
++
++            self.assertEqual(len(sets), 48)
++            for set_id, items in sets.items():
++                self.assertEqual(len(items), 2, f"Set {set_id} should have 2 items")
++                self.assertEqual(sum(1 for i in items if i.endswith("-A")), 1)
++                self.assertEqual(sum(1 for i in items if i.endswith("-B")), 1)
++
++            # Item 24: Leading-zero lot 060723 preserved unchanged in SQLite
++            inv_003_a = db.execute(
++                "SELECT * FROM inventory WHERE item_id = 'INV-003-A'"
++            ).fetchone()
++            self.assertEqual(inv_003_a["lot_code"], "060723")
++            self.assertEqual(inv_003_a["simulated_quantity"], 65)
++            self.assertEqual(inv_003_a["store_id"], "SIM-STORE-04")
++            self.assertEqual(inv_003_a["inventory_reference_date"], "2023-08-25")
++
++    def test_refuses_to_overwrite_existing_database(self) -> None:
++        db_path = self.tmp_dir / "existing.sqlite"
++        db_path.write_text("placeholder", encoding="utf-8")
++        with self.assertRaises(InventoryLoadError):
++            build_inventory_store(db_path, json_path=DEFAULT_INVENTORY_JSON)
++
++    def test_rejects_invalid_set_pair_or_count(self) -> None:
++        raw = json.loads(DEFAULT_INVENTORY_JSON.read_text(encoding="utf-8"))
++        bad = deepcopy(raw)
++        # Replace INV-001-B with another -A suffix
++        bad["records"][1]["item_id"] = "INV-001-A2"
++        bad_json = self.tmp_dir / "bad.json"
++        bad_json.write_text(json.dumps(bad), encoding="utf-8")
++        with self.assertRaises(InventoryLoadError):
++            build_inventory_store(self.tmp_dir / "bad.sqlite", json_path=bad_json)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/test_inventory_match.py b/tests/test_inventory_match.py
+new file mode 100644
+index 0000000..5b23b49
+--- /dev/null
++++ b/tests/test_inventory_match.py
+@@ -0,0 +1,164 @@
++"""Acceptance tests for inventory_match.py (Items 2-7, 17, 24-28)."""
++
++import unittest
++
++from inventory_match import (
++    RecallInventoryScope,
++    compare_recall_to_inventory,
++)
++from inventory_store import InventoryRow
++
++
++def _make_row(**overrides) -> InventoryRow:
++    base = {
++        "inventory_set_id": "SIMSET-001",
++        "item_id": "INV-001-A",
++        "retailer_id": "SIM-RETAILER-01",
++        "store_id": "SIM-STORE-02",
++        "product_label": "Donutful Chocolate Dipped Vanilla Cake Donuts",
++        "brand": "",
++        "upc": "850041392103",
++        "lot_code": "26078",
++        "package_size": "7.05oz",
++        "simulated_quantity": 12,
++        "quantity_unit": "packages",
++        "inventory_reference_date": "2026-08-17",
++        "source_type": "SYNTHETIC",
++        "synthetic_generation_note": "Fictional stock record",
++    }
++    base.update(overrides)
++    return InventoryRow.model_validate(base)
++
++
++def _make_scope(**overrides) -> RecallInventoryScope:
++    base = {
++        "recall_number": "H-0011-2027",
++        "snapshot_id": "FDA-FOOD-2026-10-23-USER-SNAPSHOT",
++        "event_id": "99686",
++        "product_name": "Donutful Chocolate Dipped Vanilla Cake Donuts - 7.05oz/10ct. UPC 850041392103.",
++        "brand": None,
++        "lot_numbers": ("26078",),
++        "package_sizes": ("7.05oz",),
++        "upcs": ("850041392103",),
++        "skus": (),
++        "uncertainties": (),
++        "evidence_ids": ("EV-H-0011-2027-PRODUCT_DESCRIPTION", "EV-H-0011-2027-CODE_INFO"),
++        "has_ambiguous_package_lot_relation": False,
++    }
++    base.update(overrides)
++    return RecallInventoryScope.model_validate(base)
++
++
++class TestInventoryMatch(unittest.TestCase):
++    def test_exact_match_and_package_equivalence(self) -> None:
++        """Items 1, 17, 26, 27: Pure deterministic match with package equivalence 7.05oz vs 7.05 oz and blank brand unknown."""
++        scope = _make_scope(package_sizes=("7.05 oz",))
++        row = _make_row(package_size="7.05oz", brand="")
++        match = compare_recall_to_inventory(scope, row)
++        self.assertEqual(match.match_status, "exact")
++        self.assertEqual(match.lot, "matched")
++        self.assertEqual(match.product_name, "matched")
++        self.assertEqual(match.package_size, "matched")
++        self.assertEqual(match.upc, "matched")
++        self.assertEqual(match.brand, "unknown")
++
++    def test_leading_zero_lot_preservation(self) -> None:
++        """Items 2, 24: Leading-zero lot 060723 matches 060723, never 60723."""
++        scope = _make_scope(
++            recall_number="F-1542-2023",
++            event_id="92944",
++            product_name="Somebody's Mother's Island Sauce, Net Wt 9.5 oz (270g), UPC 5803100115",
++            lot_numbers=("060723",),
++            package_sizes=("9.5 oz",),
++            upcs=("5803100115",),
++        )
++        row_exact = _make_row(
++            item_id="INV-003-A",
++            product_label="Somebody's Mother's Island Sauce",
++            lot_code="060723",
++            package_size="9.5 oz",
++            upc="5803100115",
++        )
++        match_exact = compare_recall_to_inventory(scope, row_exact)
++        self.assertEqual(match_exact.lot, "matched")
++        self.assertEqual(match_exact.match_status, "exact")
++
++        row_stripped = _make_row(
++            item_id="INV-003-A",
++            product_label="Somebody's Mother's Island Sauce",
++            lot_code="60723",
++            package_size="9.5 oz",
++            upc="5803100115",
++        )
++        match_stripped = compare_recall_to_inventory(scope, row_stripped)
++        self.assertEqual(match_stripped.lot, "mismatched")
++        self.assertEqual(match_stripped.match_status, "no_match")
++
++    def test_lot_mismatch(self) -> None:
++        """Item 3: Lot mismatch produces no_match even when UPC, product, and package match."""
++        scope = _make_scope(lot_numbers=("US3-12",))
++        row = _make_row(lot_code="US3-11")
++        match = compare_recall_to_inventory(scope, row)
++        self.assertEqual(match.lot, "mismatched")
++        self.assertEqual(match.match_status, "no_match")
++
++    def test_brand_mismatch_and_unknown_handling(self) -> None:
++        """Items 4, 27: Blank brand is unknown; concrete disagreeing brand is mismatched."""
++        scope = _make_scope(brand="Fullei Fresh")
++        row_blank = _make_row(brand="")
++        match_blank = compare_recall_to_inventory(scope, row_blank)
++        self.assertEqual(match_blank.brand, "unknown")
++        # Because recall specified a concrete brand and inventory brand is unknown, match is partial
++        self.assertEqual(match_blank.match_status, "partial")
++
++        row_mismatch = _make_row(brand="SWAD")
++        match_mismatch = compare_recall_to_inventory(scope, row_mismatch)
++        self.assertEqual(match_mismatch.brand, "mismatched")
++        self.assertEqual(match_mismatch.match_status, "no_match")
++
++    def test_package_size_mismatch(self) -> None:
++        """Item 5: Concrete package size mismatch returns no_match."""
++        scope = _make_scope(package_sizes=("7.05oz",))
++        row = _make_row(package_size="14 oz")
++        match = compare_recall_to_inventory(scope, row)
++        self.assertEqual(match.package_size, "mismatched")
++        self.assertEqual(match.match_status, "no_match")
++
++    def test_product_name_mismatch_and_distractor_exclusion(self) -> None:
++        """Items 6, 28: *-B distractor with different product, lot, and package is excluded."""
++        scope = _make_scope()
++        distractor = _make_row(
++            item_id="INV-001-B",
++            product_label="Southern Belle Seafood Crabmeat Stuffing",
++            upc="",
++            lot_code="",
++            package_size="",
++        )
++        match = compare_recall_to_inventory(scope, distractor)
++        self.assertEqual(match.product_name, "mismatched")
++        self.assertEqual(match.match_status, "no_match")
++
++    def test_upc_separator_equivalence_and_mismatch(self) -> None:
++        """Items 7, 25: UPC separators/spaces normalize for digit comparison only; never sole lot proof."""
++        scope = _make_scope(upcs=("17442 30012",))
++        row_same_upc = _make_row(upc="17442-30012")
++        match = compare_recall_to_inventory(scope, row_same_upc)
++        self.assertEqual(match.upc, "matched")
++        self.assertEqual(match.match_status, "exact")
++
++        # UPC match with missing lot in inventory is partial, never exact
++        row_no_lot = _make_row(upc="1744230012", lot_code="")
++        match_no_lot = compare_recall_to_inventory(scope, row_no_lot)
++        self.assertEqual(match_no_lot.upc, "matched")
++        self.assertEqual(match_no_lot.lot, "unknown")
++        self.assertEqual(match_no_lot.match_status, "partial")
++
++        # UPC mismatch
++        row_bad_upc = _make_row(upc="999999999999")
++        match_bad = compare_recall_to_inventory(scope, row_bad_upc)
++        self.assertEqual(match_bad.upc, "mismatched")
++        self.assertEqual(match_bad.match_status, "no_match")
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/test_inventory_store.py b/tests/test_inventory_store.py
+new file mode 100644
+index 0000000..28e0fae
+--- /dev/null
++++ b/tests/test_inventory_store.py
+@@ -0,0 +1,85 @@
++"""Acceptance tests for inventory_store.py (Items 14, 16, 18, 29)."""
++
++from pathlib import Path
++import sqlite3
++import tempfile
++import unittest
++
++from inventory_loader import DEFAULT_INVENTORY_JSON, build_inventory_store
++from inventory_store import (
++    InventorySchemaError,
++    InventoryStore,
++    InventoryStoreError,
++)
++
++
++class TestInventoryStore(unittest.TestCase):
++    @classmethod
++    def setUpClass(cls) -> None:
++        cls._tmp = tempfile.TemporaryDirectory()
++        cls.db_path = Path(cls._tmp.name) / "inventory.sqlite"
++        build_inventory_store(cls.db_path, json_path=DEFAULT_INVENTORY_JSON)
++
++    @classmethod
++    def tearDownClass(cls) -> None:
++        cls._tmp.cleanup()
++
++    def test_opens_read_only_and_blocks_writes(self) -> None:
++        """Item 16: SQL connection opens read-only and cannot modify inventory."""
++        with InventoryStore(self.db_path) as store:
++            self.assertEqual(store.snapshot_id, "FDA-FOOD-2026-10-23-USER-SNAPSHOT")
++            self.assertEqual(store.set_count, 48)
++            self.assertEqual(store.record_count, 96)
++            with self.assertRaises(sqlite3.OperationalError):
++                store._db.execute(
++                    "UPDATE inventory SET simulated_quantity = 0 WHERE item_id = 'INV-001-A'"
++                )
++            with self.assertRaises(sqlite3.OperationalError):
++                store._db.execute("DELETE FROM inventory")
++
++    def test_missing_database_raises_store_error(self) -> None:
++        """Item 14: Unavailable SQLite database raises InventoryStoreError."""
++        with self.assertRaises(InventoryStoreError):
++            InventoryStore(Path(self._tmp.name) / "does_not_exist.sqlite")
++
++    def test_invalid_schema_raises_schema_error(self) -> None:
++        from contextlib import closing
++
++        bad_db = Path(self._tmp.name) / "bad_schema.sqlite"
++        with closing(sqlite3.connect(bad_db)) as db:
++            with db:
++                db.execute("CREATE TABLE inventory (item_id TEXT PRIMARY KEY)")
++        with self.assertRaises(InventorySchemaError):
++            InventoryStore(bad_db)
++
++    def test_candidate_lookup_priority_and_vector_id_resolution(self) -> None:
++        """Items 18, 29: Candidate IDs from Qdrant/vector search absent from SQLite are rejected."""
++        with InventoryStore(self.db_path) as store:
++            resolved = store.resolve_candidate_ids(("INV-001-A", "INV-999-MISSING", "INV-003-A"))
++            self.assertEqual([r.item_id for r in resolved], ["INV-001-A", "INV-003-A"])
++
++            # Candidate search restricted to nonexistent vector candidate returns empty
++            none_found = store.find_inventory_candidates(
++                brand=None,
++                product_name="Donutful Chocolate Dipped Vanilla Cake Donuts",
++                lot_numbers=("26078",),
++                package_sizes=("7.05oz",),
++                upcs=("850041392103",),
++                candidate_item_ids=("INV-999-MISSING",),
++            )
++            self.assertEqual(none_found, [])
++
++            # Candidate search with real data finds INV-003-A (leading zero lot 060723)
++            candidates = store.find_inventory_candidates(
++                brand=None,
++                product_name="Somebody's Mother's Island Sauce, Net Wt 9.5 oz (270g), UPC 5803100115",
++                lot_numbers=("060723",),
++                package_sizes=("9.5 oz",),
++                upcs=("5803100115",),
++            )
++            item_ids = [c.item_id for c in candidates]
++            self.assertIn("INV-003-A", item_ids)
++
++
++if __name__ == "__main__":
++    unittest.main()
