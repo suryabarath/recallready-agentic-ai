@@ -68,6 +68,13 @@ the existing CI fixture. Its source is retained in Git, while data and JUnit
 results stay in ignored runtime storage. CI continues to run the normal
 permitted suite, including generated-input selector tests.
 
+For an inspectable three-route demonstration, see
+[`A1_A2_OFFLINE_DEMO_2026-11-22.md`](A1_A2_OFFLINE_DEMO_2026-11-22.md). It
+saves complete A1/coordinator/A2 states while keeping external responses
+offline and clearly labeled as simulated.
+The same guide records a subsequent controlled live matched-case run; its
+result is distinct from the 19-case offline development-data check below.
+
 ## Actual verification
 
 The exporter tests passed **13 tests in 0.13 seconds** using generated fixtures.
