@@ -44,9 +44,10 @@ Use a separate, explicitly scoped request for live model or Qdrant testing.
 
 The policy is a pull request, one teammate approval and a successful
 `offline-regression` check before changes reach `main`. The repository is
-public. Its active `Protect main` ruleset requires one approving review and
-blocks deletion and force pushes, with no bypass actors. Add the required CI
-check to this ruleset after its first successful hosted run.
+public. Its active `Protect main` ruleset requires one approving review, the
+successful GitHub Actions `offline-regression` check, up-to-date branches and
+resolved review conversations. New code changes dismiss stale approvals.
+Deletion and force pushes are blocked, with no bypass actors.
 
 The FDA fixture is provisioned as a repository Actions secret. Actual hosted
 results appear in the PR checks and Actions page; local results alone do not
