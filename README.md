@@ -1,6 +1,11 @@
 # RecallReady
 Evidence-grounded investigation of historical FDA food recalls against simulated retailer inventory, using vector retrieval and four bounded AI agents.
 
+For new development, follow [CONTRIBUTING](CONTRIBUTING.md): start from current
+`main`, use a focused branch, and request teammate review through a PR.
+[CI setup](docs/CI_SETUP_2026-11-22.md) records workflow verification, the
+private source fixture, and the public repository's review and CI rules.
+
 **Local A2 integration — 22 November 2026:** this branch adds optional A2
 investigation to the verified A1 coordinator. The
 [isolated integration guide](docs/A2_ISOLATED_INTEGRATION_2026-11-22.md)
