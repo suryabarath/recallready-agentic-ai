@@ -6,6 +6,11 @@ For new development, follow [CONTRIBUTING](CONTRIBUTING.md): start from current
 [CI setup](docs/CI_SETUP_2026-11-22.md) records workflow verification, the
 private source fixture, and the public repository's review and CI rules.
 
+The [A2 development inventory guide](docs/A2_DEVELOPMENT_INVENTORY_2026-11-22.md)
+documents a checksum-verified 18-set/36-row subset of the existing synthetic
+inventory, its reproduction command and 19 explicit offline dataset checks.
+The original 21 full-package-dependent tests remain separate and unrun.
+
 **Local A2 integration — 22 November 2026:** this branch adds optional A2
 investigation to the verified A1 coordinator. The
 [isolated integration guide](docs/A2_ISOLATED_INTEGRATION_2026-11-22.md)
