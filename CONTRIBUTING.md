@@ -42,13 +42,12 @@ Use a separate, explicitly scoped request for live model or Qdrant testing.
 
 ## Review and enforcement
 
-The intended policy is a pull request, one teammate approval and a successful
-`offline-regression` check before changes reach `main`. GitHub currently
-reports this repository as private. GitHub Free does not enforce protected
-branches for this repository: the API returned
-`Upgrade to GitHub Pro or make this repository public to enable this feature.`
+The policy is a pull request, one teammate approval and a successful
+`offline-regression` check before changes reach `main`. The repository is
+public. Its active `Protect main` ruleset requires one approving review and
+blocks deletion and force pushes, with no bypass actors. Add the required CI
+check to this ruleset after its first successful hosted run.
 
-Until a supported plan/visibility is chosen, PR review is a team convention,
-not a platform-enforced guarantee. The workflow is prepared locally; its
-private fixture and GitHub execution still need setup. See
-[CI setup](docs/CI_SETUP_2026-11-22.md) for activation and billing conditions.
+The FDA fixture is provisioned as a repository Actions secret. Actual hosted
+results appear in the PR checks and Actions page; local results alone do not
+establish CI success. See [CI setup](docs/CI_SETUP_2026-11-22.md).
