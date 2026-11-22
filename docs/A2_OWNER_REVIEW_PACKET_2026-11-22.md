@@ -28,6 +28,26 @@ UPC `850041392103`, simulated quantity 12 packages. The complete private
 artifact and source/ledger verification are documented in
 `docs/A1_A2_OFFLINE_DEMO_2026-11-22.md`.
 
+An independent read-only comparison of each selected A/B row against the
+reviewed A1 fixtures produced the following attribute-level observations:
+
+| Recall | A1 lot/batch identifier | Selected `-A` row | Selected `-B` row |
+| --- | --- | --- | --- |
+| `H-0011-2027` | `26078` | Exact lot, product, package and UPC | No lot; different product |
+| `F-1542-2023` | `060723` | Exact lot, product, package and UPC | No lot; different product |
+| `F-0818-2023` | `US3-12` | Product, package and UPC match; lot differs | No lot; different product |
+| `F-0882-2023` | Batch `2-401` | Product and package match; code differs | No lot; different product |
+| `F-1025-2023` | Batch `101097` | Product and brand match; code differs | No lot; different product |
+| `F-0011-2024` | `23194` | Product, package and UPC match; lot differs | No lot; different product |
+| `F-0332-2023` | `022422SRB` | Product, package and UPC match; lot differs | No lot; different product |
+| `H-1273-2026` | `LB028ACP04` | Product, package, UPC and brand match; lot differs | No lot; different product |
+
+The A1 identifiers above are literal strings, including the leading zero in
+`060723` and `022422SRB`. Under the current strict lot rule, all six Group B
+`-A` rows are `no_match` despite their other matching attributes. For the two
+batch cases, A2 compares the batch value to the inventory `lot_code`. This is a
+policy observation for review, not independent ground truth.
+
 ## Policy decisions requested from the owner
 
 1. **Product names:** `APPROVED_PRODUCT_NAME_EQUIVALENCES` in
