@@ -1,6 +1,14 @@
 # RecallReady
 Evidence-grounded investigation of historical FDA food recalls against simulated retailer inventory, using vector retrieval and four bounded AI agents.
 
+**Local A2 integration — 22 November 2026:** this branch adds optional A2
+investigation to the verified A1 coordinator. The
+[isolated integration guide](docs/A2_ISOLATED_INTEGRATION_2026-11-22.md)
+explains routing, source provenance, synthetic test setup and limitations.
+The permitted regression selection passed 969 tests; 21 dataset-dependent
+tests remain unrun. A3/A4 integration is pending. The A1 notes below describe
+the preceding implementation and live checks.
+
 **A1 handoff — 20 November 2026:** start with the
 [technical handoff](docs/A1_HANDOFF_2026-11-20.md) for setup, interfaces,
 transfer requirements and pending integration. The
@@ -79,5 +87,9 @@ The [targeted live verification](docs/A1_REVIEW_LIVE_RESULTS_2026-11-19.md)
 records the subsequent two successful runs with the review policy in place.
 
 ```bash
-.venv/bin/python -m pytest -q
+../code_workspace/.venv/bin/python -B -m pytest -q -p no:cacheprovider \
+  --ignore=tests/test_inventory_loader.py \
+  --ignore=tests/test_inventory_store.py \
+  --ignore=tests/test_a2_agent.py \
+  --ignore=tests/test_a2_review_fixes.py
 ```

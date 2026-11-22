@@ -1,4 +1,4 @@
-"""Bounded A1-only LangGraph coordinator; no downstream agents or stock decisions."""
+"""Bounded A1 and optional A2 graph; no stock actions or later agents."""
 
 from datetime import datetime, timezone
 
@@ -7,10 +7,12 @@ from langsmith import tracing_context
 from openai import OpenAI
 
 from a1_run import RunError, run_a1_with_trace
+from a2_agent import A2Error, run_a2
 from case_state import CaseEvent, CaseRequest, CaseState
 from fda_store import FDAStore
 from group_c_contract import GroupCResult
 from interpreter import Budget
+from inventory_store import InventoryStore
 from qdrant_a1 import QdrantA1
 from validation import HumanLotApproval
 
@@ -27,10 +29,12 @@ class A1Coordinator:
     """
 
     def __init__(self, store: FDAStore, retriever: QdrantA1, client: OpenAI, budget: Budget, *,
-                 approved_lots: tuple[HumanLotApproval, ...] = (), max_output_tokens: int = 4000):
+                 approved_lots: tuple[HumanLotApproval, ...] = (), max_output_tokens: int = 4000,
+                 inventory_store: InventoryStore | None = None):
         self.store, self.retriever, self.client, self.budget = store, retriever, client, budget
         self.approved_lots = approved_lots
         self.max_output_tokens = max_output_tokens
+        self.inventory_store = inventory_store
         graph = StateGraph(CaseState, input_schema=CaseRequest, output_schema=CaseState)
         graph.add_node("begin", self._begin)
         graph.add_node("interpret_a1", self._interpret)
@@ -39,9 +43,17 @@ class A1Coordinator:
         graph.add_node("stop", self._stop)
         graph.add_edge(START, "begin")
         graph.add_edge("begin", "interpret_a1")
-        graph.add_conditional_edges("interpret_a1", self._route,
-                                     {"complete": "complete", "review": "review", "stop": "stop"})
-        for terminal in ("complete", "review", "stop"):
+        routes = {"complete": "complete", "review": "review", "stop": "stop"}
+        terminals = ["complete", "review", "stop"]
+        if inventory_store is not None:
+            graph.add_node("investigate_a2", self._investigate_a2)
+            graph.add_node("a2_complete", self._a2_complete)
+            graph.add_conditional_edges("investigate_a2", self._after_a2,
+                                        {"complete": "a2_complete", "review": "review", "stop": "stop"})
+            routes["investigate_a2"] = "investigate_a2"
+            terminals.append("a2_complete")
+        graph.add_conditional_edges("interpret_a1", self._route, routes)
+        for terminal in terminals:
             graph.add_edge(terminal, END)
         self._graph = graph.compile()
 
@@ -72,14 +84,39 @@ class A1Coordinator:
         return {"a1": envelope, "errors": [envelope.error] if envelope.error else [],
                 "events": state.events + [_event("a1_validated" if envelope.status == "validated" else "a1_unresolved")]}
 
-    @staticmethod
-    def _route(state: CaseState) -> str:
+    def _route(self, state: CaseState) -> str:
         if state.a1 is None or state.a1.status == "unresolved":
             return "stop"
         result = state.a1.result
         if isinstance(result, GroupCResult) or result.facts.uncertainties:
             return "review"
-        return "complete"
+        return "investigate_a2" if self.inventory_store is not None else "complete"
+
+    def _investigate_a2(self, state: CaseState) -> dict:
+        try:
+            result = run_a2(
+                self.inventory_store, state.a1, case_id=state.case_id,
+                run_id=state.run_id, recall_number=state.recall_number,
+                snapshot_id=state.snapshot_id, event_id=state.event_id)
+            CaseState.model_validate(state.model_dump() | {
+                "a2": result, "errors": [result.error] if result.error else []})
+        except Exception:
+            error = A2Error(code="inventory_match_failed",
+                            message="A2 failed unexpectedly; review required before rerunning.")
+            return {"errors": [error],
+                    "events": state.events + [_event("a2_unexpected_failure")]}
+        return {"a2": result, "errors": [result.error] if result.error else [],
+                "events": state.events + [_event("a2_" + result.status)]}
+
+    @staticmethod
+    def _after_a2(state: CaseState) -> str:
+        if state.a2 is None or state.a2.status == "unresolved":
+            return "stop"
+        return "review" if state.a2.requires_human_review else "complete"
+
+    @staticmethod
+    def _a2_complete(state: CaseState) -> dict:
+        return {"status": "a2_completed", "events": state.events + [_event("a2_completed")]}
 
     @staticmethod
     def _complete(state: CaseState) -> dict:
@@ -87,7 +124,9 @@ class A1Coordinator:
 
     @staticmethod
     def _review(state: CaseState) -> dict:
-        return {"status": "human_review", "review_reason": "A1 relationships or uncertainties require human review.",
+        reason = ("A2 partial inventory findings require human review."
+                  if state.a2 is not None else "A1 relationships or uncertainties require human review.")
+        return {"status": "human_review", "review_reason": reason,
                 "events": state.events + [_event("human_review")]}
 
     @staticmethod
