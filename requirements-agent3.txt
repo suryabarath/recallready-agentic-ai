@@ -1,0 +1,4 @@
+# Install only the dependencies needed for standalone Agent 3 development.
+# Does not alter the team's existing requirements.txt.
+pydantic>=2.11,<3
+pytest>=8,<10

@@ -1,0 +1,27 @@
+{
+  "case_id": "CASE-DEMO",
+  "run_id": "RUN-DEMO",
+  "recall_number": "H-0011-2027",
+  "snapshot_id": "DEMO-FDA-SNAPSHOT",
+  "event_id": "EVENT-DEMO",
+  "status": "matched",
+  "findings": [
+    {
+      "case_id": "CASE-DEMO",
+      "run_id": "RUN-DEMO",
+      "recall_number": "H-0011-2027",
+      "snapshot_id": "DEMO-FDA-SNAPSHOT",
+      "event_id": "EVENT-DEMO",
+      "inventory_set_id": "DEMO-SYNTHETIC-STORE",
+      "item_id": "INV-DEMO-001",
+      "match_status": "exact",
+      "lot_match": "matched",
+      "product_name_match": "matched",
+      "a1_evidence_ids": ["DEMO-EVIDENCE-PRODUCT", "DEMO-EVIDENCE-LOT"],
+      "a1_uncertainties": [],
+      "requires_human_review": false
+    }
+  ],
+  "error": null,
+  "requires_human_review": false
+}
