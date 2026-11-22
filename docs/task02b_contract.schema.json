@@ -1,0 +1,271 @@
+{
+  "$defs": {
+    "Facts": {
+      "additionalProperties": false,
+      "properties": {
+        "recall_number": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Recall Number",
+          "type": "string"
+        },
+        "product_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Product Name"
+        },
+        "recalling_firm": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Recalling Firm"
+        },
+        "recall_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Recall Reason"
+        },
+        "classification": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Classification"
+        },
+        "identifiers": {
+          "items": {
+            "$ref": "#/$defs/Identifier"
+          },
+          "title": "Identifiers",
+          "type": "array"
+        },
+        "uncertainties": {
+          "items": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "title": "Uncertainties",
+          "type": "array"
+        },
+        "evidence_ids": {
+          "items": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "title": "Evidence Ids",
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "recall_number",
+        "product_name",
+        "recalling_firm",
+        "recall_reason",
+        "classification",
+        "identifiers",
+        "uncertainties",
+        "evidence_ids"
+      ],
+      "title": "Facts",
+      "type": "object"
+    },
+    "Identifier": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "lot",
+            "batch",
+            "upc",
+            "sku",
+            "expiry_date",
+            "use_by_date",
+            "best_by_date",
+            "date_range",
+            "other"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "value": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Value",
+          "type": "string"
+        },
+        "scope_note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Scope Note"
+        },
+        "evidence_ids": {
+          "items": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Evidence Ids",
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "kind",
+        "value",
+        "scope_note",
+        "evidence_ids"
+      ],
+      "title": "Identifier",
+      "type": "object"
+    },
+    "SourceField": {
+      "additionalProperties": false,
+      "properties": {
+        "original_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Original Text"
+        },
+        "evidence_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Evidence Id"
+        },
+        "point_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Point Id"
+        }
+      },
+      "required": [
+        "original_text",
+        "evidence_id",
+        "point_id"
+      ],
+      "title": "SourceField",
+      "type": "object"
+    },
+    "SourceFields": {
+      "additionalProperties": false,
+      "properties": {
+        "product_description": {
+          "$ref": "#/$defs/SourceField"
+        },
+        "code_info": {
+          "$ref": "#/$defs/SourceField"
+        },
+        "reason_for_recall": {
+          "$ref": "#/$defs/SourceField"
+        },
+        "distribution_pattern": {
+          "$ref": "#/$defs/SourceField"
+        },
+        "recalling_firm": {
+          "$ref": "#/$defs/SourceField"
+        },
+        "classification": {
+          "$ref": "#/$defs/SourceField"
+        }
+      },
+      "required": [
+        "product_description",
+        "code_info",
+        "reason_for_recall",
+        "distribution_pattern",
+        "recalling_firm",
+        "classification"
+      ],
+      "title": "SourceFields",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "contract_version": {
+      "const": "0.1-proposed",
+      "title": "Contract Version",
+      "type": "string"
+    },
+    "snapshot_id": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "title": "Snapshot Id",
+      "type": "string"
+    },
+    "event_id": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "title": "Event Id",
+      "type": "string"
+    },
+    "facts": {
+      "$ref": "#/$defs/Facts"
+    },
+    "source_fields": {
+      "$ref": "#/$defs/SourceFields"
+    }
+  },
+  "required": [
+    "contract_version",
+    "snapshot_id",
+    "event_id",
+    "facts",
+    "source_fields"
+  ],
+  "title": "A1Result",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

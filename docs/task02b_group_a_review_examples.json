@@ -1,0 +1,432 @@
+[
+  {
+    "contract_version": "0.1-proposed",
+    "snapshot_id": "FDA-FOOD-2026-10-23-USER-SNAPSHOT",
+    "event_id": "99686",
+    "facts": {
+      "recall_number": "H-0011-2027",
+      "product_name": "Donutful Chocolate Dipped Vanilla Cake Donuts - 7.05oz/10ct.Case Configuration   5 count carton, 6 cartons per case. UPC 850041392103. Paperboard carton containing 5 individually wrapped packages of two donuts each. UPC: 850041392103. The Better Bakehouse Snack Co.  3651 Lindell Rd, Suite D700  Las Vegas, NV 89103",
+      "recalling_firm": "The Better Bakehouse Snack Company",
+      "recall_reason": "Undeclared Milk.",
+      "classification": "Class I",
+      "identifiers": [
+        {
+          "kind": "lot",
+          "value": "26078",
+          "scope_note": "Lot # 26078 BEST BY: 09/15/2026",
+          "evidence_ids": [
+            "EV-H-0011-2027-CODE_INFO"
+          ]
+        },
+        {
+          "kind": "best_by_date",
+          "value": "09/15/2026",
+          "scope_note": "Lot # 26078 BEST BY: 09/15/2026",
+          "evidence_ids": [
+            "EV-H-0011-2027-CODE_INFO"
+          ]
+        },
+        {
+          "kind": "upc",
+          "value": "850041392103",
+          "scope_note": "Donutful Chocolate Dipped Vanilla Cake Donuts - 7.05oz/10ct.Case Configuration   5 count carton, 6 cartons per case. UPC 850041392103. Paperboard carton containing 5 individually wrapped packages of two donuts each. UPC: 850041392103. The Better Bakehouse Snack Co.  3651 Lindell Rd, Suite D700  Las Vegas, NV 89103",
+          "evidence_ids": [
+            "EV-H-0011-2027-PRODUCT_DESCRIPTION"
+          ]
+        }
+      ],
+      "uncertainties": [],
+      "evidence_ids": [
+        "EV-H-0011-2027-PRODUCT_DESCRIPTION",
+        "EV-H-0011-2027-CODE_INFO",
+        "EV-H-0011-2027-REASON_FOR_RECALL",
+        "EV-H-0011-2027-DISTRIBUTION_PATTERN"
+      ]
+    },
+    "source_fields": {
+      "product_description": {
+        "original_text": "Donutful Chocolate Dipped Vanilla Cake Donuts - 7.05oz/10ct.Case Configuration   5 count carton, 6 cartons per case. UPC 850041392103. Paperboard carton containing 5 individually wrapped packages of two donuts each. UPC: 850041392103. The Better Bakehouse Snack Co.  3651 Lindell Rd, Suite D700  Las Vegas, NV 89103",
+        "evidence_id": "EV-H-0011-2027-PRODUCT_DESCRIPTION",
+        "point_id": "50b6bb65-921a-55ed-8d00-4f5f56962cc7"
+      },
+      "code_info": {
+        "original_text": "Lot # 26078 BEST BY: 09/15/2026",
+        "evidence_id": "EV-H-0011-2027-CODE_INFO",
+        "point_id": "23aa9d8f-c28b-548a-acdd-da16818bc878"
+      },
+      "reason_for_recall": {
+        "original_text": "Undeclared Milk.",
+        "evidence_id": "EV-H-0011-2027-REASON_FOR_RECALL",
+        "point_id": "10295278-e970-55b3-b58f-c1d0752f7d70"
+      },
+      "distribution_pattern": {
+        "original_text": "Product was distributed nationwide.",
+        "evidence_id": "EV-H-0011-2027-DISTRIBUTION_PATTERN",
+        "point_id": "25a1b915-004a-566d-bb5d-22ca3d053ca4"
+      },
+      "recalling_firm": {
+        "original_text": "The Better Bakehouse Snack Company",
+        "evidence_id": null,
+        "point_id": null
+      },
+      "classification": {
+        "original_text": "Class I",
+        "evidence_id": null,
+        "point_id": null
+      }
+    }
+  },
+  {
+    "contract_version": "0.1-proposed",
+    "snapshot_id": "FDA-FOOD-2026-10-23-USER-SNAPSHOT",
+    "event_id": "92944",
+    "facts": {
+      "recall_number": "F-1542-2023",
+      "product_name": "Somebody's Mother's Island Sauce, Net Wt 9.5 oz (270g), UPC 5803100115",
+      "recalling_firm": "Somebody's Mother's Chocolate Sauce",
+      "recall_reason": "Undeclared soy",
+      "classification": "Class II",
+      "identifiers": [
+        {
+          "kind": "lot",
+          "value": "060723",
+          "scope_note": "Lot 060723",
+          "evidence_ids": [
+            "EV-F-1542-2023-CODE_INFO"
+          ]
+        },
+        {
+          "kind": "upc",
+          "value": "5803100115",
+          "scope_note": "Somebody's Mother's Island Sauce, Net Wt 9.5 oz (270g), UPC 5803100115",
+          "evidence_ids": [
+            "EV-F-1542-2023-PRODUCT_DESCRIPTION"
+          ]
+        }
+      ],
+      "uncertainties": [],
+      "evidence_ids": [
+        "EV-F-1542-2023-PRODUCT_DESCRIPTION",
+        "EV-F-1542-2023-CODE_INFO",
+        "EV-F-1542-2023-REASON_FOR_RECALL",
+        "EV-F-1542-2023-DISTRIBUTION_PATTERN"
+      ]
+    },
+    "source_fields": {
+      "product_description": {
+        "original_text": "Somebody's Mother's Island Sauce, Net Wt 9.5 oz (270g), UPC 5803100115",
+        "evidence_id": "EV-F-1542-2023-PRODUCT_DESCRIPTION",
+        "point_id": "a4c7785b-4499-5056-bba4-31c4dfbcbd68"
+      },
+      "code_info": {
+        "original_text": "Lot 060723",
+        "evidence_id": "EV-F-1542-2023-CODE_INFO",
+        "point_id": "2a80c32c-cde6-5bbc-90d3-8d50a5cfcdb9"
+      },
+      "reason_for_recall": {
+        "original_text": "Undeclared soy",
+        "evidence_id": "EV-F-1542-2023-REASON_FOR_RECALL",
+        "point_id": "a1415621-7787-544e-bec5-e4f216161018"
+      },
+      "distribution_pattern": {
+        "original_text": "Texas",
+        "evidence_id": "EV-F-1542-2023-DISTRIBUTION_PATTERN",
+        "point_id": "493fa3a0-eda7-5c74-83ae-0c0b95cb8ccb"
+      },
+      "recalling_firm": {
+        "original_text": "Somebody's Mother's Chocolate Sauce",
+        "evidence_id": null,
+        "point_id": null
+      },
+      "classification": {
+        "original_text": "Class II",
+        "evidence_id": null,
+        "point_id": null
+      }
+    }
+  },
+  {
+    "contract_version": "0.1-proposed",
+    "snapshot_id": "FDA-FOOD-2026-10-23-USER-SNAPSHOT",
+    "event_id": "94806",
+    "facts": {
+      "recall_number": "F-1472-2024",
+      "product_name": "Arepas La Mejor, Arepa de Chocolo (Chocolate Sweet Corn Pancakes), NET WT. 25 Oz., 5 units per package, KEEP REFRIGERATED",
+      "recalling_firm": "Villa Nueva Interservices LLC",
+      "recall_reason": "Undeclared allergens: Milk",
+      "classification": "Class I",
+      "identifiers": [
+        {
+          "kind": "other",
+          "value": "06-04-24 08/04/2024",
+          "scope_note": "LOT # 06-04-24 08/04/2024",
+          "evidence_ids": [
+            "EV-F-1472-2024-CODE_INFO"
+          ]
+        }
+      ],
+      "uncertainties": [
+        "The source labels the phrase LOT # but does not make the boundary or meaning of its two date-like segments explicit. A separately typed lot and any expiry meaning need review."
+      ],
+      "evidence_ids": [
+        "EV-F-1472-2024-PRODUCT_DESCRIPTION",
+        "EV-F-1472-2024-CODE_INFO",
+        "EV-F-1472-2024-REASON_FOR_RECALL",
+        "EV-F-1472-2024-DISTRIBUTION_PATTERN"
+      ]
+    },
+    "source_fields": {
+      "product_description": {
+        "original_text": "Arepas La Mejor, Arepa de Chocolo (Chocolate Sweet Corn Pancakes), NET WT. 25 Oz., 5 units per package, KEEP REFRIGERATED",
+        "evidence_id": "EV-F-1472-2024-PRODUCT_DESCRIPTION",
+        "point_id": "8e80cd09-ce77-5302-9cec-106d6580be8c"
+      },
+      "code_info": {
+        "original_text": "LOT # 06-04-24 08/04/2024",
+        "evidence_id": "EV-F-1472-2024-CODE_INFO",
+        "point_id": "9b498cde-82cc-554d-82a4-ec9d3fa0a6f9"
+      },
+      "reason_for_recall": {
+        "original_text": "Undeclared allergens: Milk",
+        "evidence_id": "EV-F-1472-2024-REASON_FOR_RECALL",
+        "point_id": "d336d214-3460-5c82-9d91-fd9bb60bf0c2"
+      },
+      "distribution_pattern": {
+        "original_text": "Domestic distribution only. (Florida)",
+        "evidence_id": "EV-F-1472-2024-DISTRIBUTION_PATTERN",
+        "point_id": "05f9097f-6af2-51bd-93db-57677769143e"
+      },
+      "recalling_firm": {
+        "original_text": "Villa Nueva Interservices LLC",
+        "evidence_id": null,
+        "point_id": null
+      },
+      "classification": {
+        "original_text": "Class I",
+        "evidence_id": null,
+        "point_id": null
+      }
+    }
+  },
+  {
+    "contract_version": "0.1-proposed",
+    "snapshot_id": "FDA-FOOD-2026-10-23-USER-SNAPSHOT",
+    "event_id": "97487",
+    "facts": {
+      "recall_number": "H-0579-2025",
+      "product_name": "Hershey s Ice Cream, Green Mint Chip (GMC) Bulk, 3 gallons, 1 unit , bulk can- a cardboard tub with metal rings and cardboard lid",
+      "recalling_firm": "HERSHEY CREAMERY CO.",
+      "recall_reason": "Product tested elevated coliform counts during routine testing",
+      "classification": "Class II",
+      "identifiers": [
+        {
+          "kind": "lot",
+          "value": "25223M",
+          "scope_note": "\" Lot Number: 25223M  \" SKU: 24682-05020 \" Consecutive Count: 499-6100",
+          "evidence_ids": [
+            "EV-H-0579-2025-CODE_INFO"
+          ]
+        },
+        {
+          "kind": "sku",
+          "value": "24682-05020",
+          "scope_note": "\" Lot Number: 25223M  \" SKU: 24682-05020 \" Consecutive Count: 499-6100",
+          "evidence_ids": [
+            "EV-H-0579-2025-CODE_INFO"
+          ]
+        },
+        {
+          "kind": "other",
+          "value": "499-6100",
+          "scope_note": "\" Lot Number: 25223M  \" SKU: 24682-05020 \" Consecutive Count: 499-6100",
+          "evidence_ids": [
+            "EV-H-0579-2025-CODE_INFO"
+          ]
+        }
+      ],
+      "uncertainties": [
+        "Consecutive Count is preserved as other; it is not asserted to be a lot or date range."
+      ],
+      "evidence_ids": [
+        "EV-H-0579-2025-PRODUCT_DESCRIPTION",
+        "EV-H-0579-2025-CODE_INFO",
+        "EV-H-0579-2025-REASON_FOR_RECALL",
+        "EV-H-0579-2025-DISTRIBUTION_PATTERN"
+      ]
+    },
+    "source_fields": {
+      "product_description": {
+        "original_text": "Hershey s Ice Cream, Green Mint Chip (GMC) Bulk, 3 gallons, 1 unit , bulk can- a cardboard tub with metal rings and cardboard lid",
+        "evidence_id": "EV-H-0579-2025-PRODUCT_DESCRIPTION",
+        "point_id": "968ee6a8-977d-54c6-afea-46ab1462876f"
+      },
+      "code_info": {
+        "original_text": "\" Lot Number: 25223M  \" SKU: 24682-05020 \" Consecutive Count: 499-6100",
+        "evidence_id": "EV-H-0579-2025-CODE_INFO",
+        "point_id": "2fadd04e-c137-5712-8d3d-2c63da09fa21"
+      },
+      "reason_for_recall": {
+        "original_text": "Product tested elevated coliform counts during routine testing",
+        "evidence_id": "EV-H-0579-2025-REASON_FOR_RECALL",
+        "point_id": "63e84484-b352-5a51-9d21-6f8a0e7fb0cf"
+      },
+      "distribution_pattern": {
+        "original_text": "The recalled product was distributed to the following states: DE, NY, FL, MD, IN, NC, OH",
+        "evidence_id": "EV-H-0579-2025-DISTRIBUTION_PATTERN",
+        "point_id": "a7a203bd-2b1c-5437-afd2-42e1980a921c"
+      },
+      "recalling_firm": {
+        "original_text": "HERSHEY CREAMERY CO.",
+        "evidence_id": null,
+        "point_id": null
+      },
+      "classification": {
+        "original_text": "Class II",
+        "evidence_id": null,
+        "point_id": null
+      }
+    }
+  },
+  {
+    "contract_version": "0.1-proposed",
+    "snapshot_id": "FDA-FOOD-2026-10-23-USER-SNAPSHOT",
+    "event_id": "96464",
+    "facts": {
+      "recall_number": "F-0705-2025",
+      "product_name": "BaiWei ShanZhuang, Dried Seedless Plum Candy, 9.16 oz. (260g), plastic bags, 30 bags per case.",
+      "recalling_firm": "Tristar Food Wholesale Co Inc",
+      "recall_reason": "Product contains cyclamates",
+      "classification": "Class III",
+      "identifiers": [
+        {
+          "kind": "other",
+          "value": "04162026 BC 6937218914734",
+          "scope_note": "Lot: 04162026 BC 6937218914734",
+          "evidence_ids": [
+            "EV-F-0705-2025-CODE_INFO"
+          ]
+        }
+      ],
+      "uncertainties": [
+        "The source does not establish the boundary of the Lot value or the meaning of BC; the combined phrase requires review before exact lot matching."
+      ],
+      "evidence_ids": [
+        "EV-F-0705-2025-PRODUCT_DESCRIPTION",
+        "EV-F-0705-2025-CODE_INFO",
+        "EV-F-0705-2025-REASON_FOR_RECALL",
+        "EV-F-0705-2025-DISTRIBUTION_PATTERN"
+      ]
+    },
+    "source_fields": {
+      "product_description": {
+        "original_text": "BaiWei ShanZhuang, Dried Seedless Plum Candy, 9.16 oz. (260g), plastic bags, 30 bags per case.",
+        "evidence_id": "EV-F-0705-2025-PRODUCT_DESCRIPTION",
+        "point_id": "0f131e22-426e-5906-ae4d-6bae992279b5"
+      },
+      "code_info": {
+        "original_text": "Lot: 04162026 BC 6937218914734",
+        "evidence_id": "EV-F-0705-2025-CODE_INFO",
+        "point_id": "107cfe66-e7de-5772-9ba8-56f783d5d333"
+      },
+      "reason_for_recall": {
+        "original_text": "Product contains cyclamates",
+        "evidence_id": "EV-F-0705-2025-REASON_FOR_RECALL",
+        "point_id": "156a758e-9aa6-5c77-ba6c-1e2dd9887dc1"
+      },
+      "distribution_pattern": {
+        "original_text": "The recalled product was distributed to the following states: MA, NY, MI, FL, TX, IA, IL, CO, NE, RI, WI,",
+        "evidence_id": "EV-F-0705-2025-DISTRIBUTION_PATTERN",
+        "point_id": "01b34510-bcda-5c5a-952f-e517862b47a7"
+      },
+      "recalling_firm": {
+        "original_text": "Tristar Food Wholesale Co Inc",
+        "evidence_id": null,
+        "point_id": null
+      },
+      "classification": {
+        "original_text": "Class III",
+        "evidence_id": null,
+        "point_id": null
+      }
+    }
+  },
+  {
+    "contract_version": "0.1-proposed",
+    "snapshot_id": "FDA-FOOD-2026-10-23-USER-SNAPSHOT",
+    "event_id": "91439",
+    "facts": {
+      "recall_number": "F-0324-2023",
+      "product_name": "Fullei Fresh brand Alfalfa Sprouts in a 4 oz. clear plastic clamshell container; UPC Code 17442 30012. Packaged in 5lb carboard box 12 packages of 4 oz",
+      "recalling_firm": "Kwokcheng Enterprise, Inc. dba Fullei Fresh",
+      "recall_reason": "Possible contamination with Shiga toxin-producing E. coli (non-O157:H7 STEC)",
+      "classification": "Class I",
+      "identifiers": [
+        {
+          "kind": "lot",
+          "value": "336",
+          "scope_note": "Lot:336; Sell by: Jan 06 2023",
+          "evidence_ids": [
+            "EV-F-0324-2023-CODE_INFO"
+          ]
+        },
+        {
+          "kind": "other",
+          "value": "Jan 06 2023",
+          "scope_note": "Lot:336; Sell by: Jan 06 2023",
+          "evidence_ids": [
+            "EV-F-0324-2023-CODE_INFO"
+          ]
+        },
+        {
+          "kind": "upc",
+          "value": "17442 30012",
+          "scope_note": "Fullei Fresh brand Alfalfa Sprouts in a 4 oz. clear plastic clamshell container; UPC Code 17442 30012. Packaged in 5lb carboard box 12 packages of 4 oz",
+          "evidence_ids": [
+            "EV-F-0324-2023-PRODUCT_DESCRIPTION"
+          ]
+        }
+      ],
+      "uncertainties": [
+        "The source labels Jan 06 2023 as Sell by. The unchanged starter enum has no sell_by_date kind, so other preserves that meaning in scope_note."
+      ],
+      "evidence_ids": [
+        "EV-F-0324-2023-PRODUCT_DESCRIPTION",
+        "EV-F-0324-2023-CODE_INFO",
+        "EV-F-0324-2023-REASON_FOR_RECALL",
+        "EV-F-0324-2023-DISTRIBUTION_PATTERN"
+      ]
+    },
+    "source_fields": {
+      "product_description": {
+        "original_text": "Fullei Fresh brand Alfalfa Sprouts in a 4 oz. clear plastic clamshell container; UPC Code 17442 30012. Packaged in 5lb carboard box 12 packages of 4 oz",
+        "evidence_id": "EV-F-0324-2023-PRODUCT_DESCRIPTION",
+        "point_id": "67aa6a58-6618-5d4e-866f-88a56f2245a4"
+      },
+      "code_info": {
+        "original_text": "Lot:336; Sell by: Jan 06 2023",
+        "evidence_id": "EV-F-0324-2023-CODE_INFO",
+        "point_id": "f8e041f1-d522-5efe-9ad9-e36c0785144d"
+      },
+      "reason_for_recall": {
+        "original_text": "Possible contamination with Shiga toxin-producing E. coli (non-O157:H7 STEC)",
+        "evidence_id": "EV-F-0324-2023-REASON_FOR_RECALL",
+        "point_id": "7a0104e5-877d-506a-885e-2f05719248e1"
+      },
+      "distribution_pattern": {
+        "original_text": "FL",
+        "evidence_id": "EV-F-0324-2023-DISTRIBUTION_PATTERN",
+        "point_id": "852b231c-c439-5eaf-909f-4516d5fb613b"
+      },
+      "recalling_firm": {
+        "original_text": "Kwokcheng Enterprise, Inc. dba Fullei Fresh",
+        "evidence_id": null,
+        "point_id": null
+      },
+      "classification": {
+        "original_text": "Class I",
+        "evidence_id": null,
+        "point_id": null
+      }
+    }
+  }
+]

@@ -1,0 +1,13 @@
+{
+  "approved_lots": [
+    {
+      "recall_number": "F-0705-2025",
+      "event_id": "96464",
+      "snapshot_id": "FDA-FOOD-2026-10-23-USER-SNAPSHOT",
+      "evidence_id": "EV-F-0705-2025-CODE_INFO",
+      "original_text": "Lot: 04162026 BC 6937218914734",
+      "value": "04162026 BC 6937218914734",
+      "reviewer": "Member 1"
+    }
+  ]
+}
