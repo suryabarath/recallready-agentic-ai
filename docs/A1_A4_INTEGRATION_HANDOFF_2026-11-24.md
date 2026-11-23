@@ -1,5 +1,11 @@
 # A1–A4 local integration handoff
 
+A subsequent [authorized live pilot](A1_A4_LIVE_PILOT_2026-11-24.md)
+completed one A1-through-A4 matched case with the semantic critic enabled.
+The final status was human review, with two model requests and no repairs or
+replay. The development-check and remaining-work notes below describe the
+preceding handoff checkpoint; the live pilot updates its live-coverage gap.
+
 ## Current checkpoint and scope
 
 Local branch: `feature/a4-review-local`. The reviewed A3 checkpoint remains

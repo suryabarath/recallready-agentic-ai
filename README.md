@@ -12,6 +12,9 @@ for the current optional A3/A4 coordinator path, citation/accounting fixes,
 offline verification and remaining correction-policy limits. The historical
 stage notes below retain their original dates and test counts. Runtime
 datasets and demonstration states remain private and ignored by Git.
+The [controlled live A1–A4 pilot](docs/A1_A4_LIVE_PILOT_2026-11-24.md)
+records one successful matched-case run with the semantic critic enabled,
+independent source/inventory/ledger checks and final human-review routing.
 
 The [A2 development inventory guide](docs/A2_DEVELOPMENT_INVENTORY_2026-11-22.md)
 documents a checksum-verified 18-set/36-row subset of the existing synthetic
