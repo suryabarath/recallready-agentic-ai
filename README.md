@@ -6,6 +6,13 @@ For new development, follow [CONTRIBUTING](CONTRIBUTING.md): start from current
 [CI setup](docs/CI_SETUP_2026-11-22.md) records workflow verification, the
 private source fixture, and the public repository's review and CI rules.
 
+**Local A1–A4 update — 24 November 2026:** see the
+[A4 review and integration guide](docs/A4_REVIEW_AND_INTEGRATION_2026-11-24.md)
+for the current optional A3/A4 coordinator path, citation/accounting fixes,
+offline verification and remaining correction-policy limits. The historical
+stage notes below retain their original dates and test counts. Runtime
+datasets and demonstration states remain private and ignored by Git.
+
 The [A2 development inventory guide](docs/A2_DEVELOPMENT_INVENTORY_2026-11-22.md)
 documents a checksum-verified 18-set/36-row subset of the existing synthetic
 inventory, its reproduction command and 19 explicit offline dataset checks.

@@ -1,4 +1,4 @@
-"""Case state for A1, optional A2 and A3; A4 remains outside this slice."""
+"""Case state for the bounded A1-A4 workflow and one recorded A3 replay."""
 
 from typing import Literal, Self
 
@@ -7,6 +7,8 @@ from pydantic import Field, model_validator
 from a1_run import A1RunEnvelope, RunError
 from a2_agent import A2Error, A2RunEnvelope
 from a3_agent import A3Error, A3RunEnvelope, validate_plan_against_a2
+from a4_agent import A4RunEnvelope
+from a4_checks import A4Error
 from group_c_contract import GroupCResult
 from models import Nonblank, StrictModel
 
@@ -22,7 +24,9 @@ class CaseRequest(StrictModel):
 class CaseEvent(StrictModel):
     event: Literal["started", "a1_validated", "a1_unresolved", "a1_unexpected_failure",
                    "a1_completed", "a2_matched", "a2_partial", "a2_no_match", "a2_unresolved",
-                   "a2_unexpected_failure", "a2_completed", "a3_planned", "a3_unexpected_failure", "human_review", "stopped"]
+                   "a2_unexpected_failure", "a2_completed", "a3_planned", "a3_unexpected_failure",
+                   "a4_human_review", "a4_revise", "a4_unresolved", "a4_approved", "a4_unexpected_failure",
+                   "revision_replay_started", "a3_replanned", "human_review", "stopped"]
     timestamp_utc: Nonblank
 
 
@@ -31,18 +35,49 @@ class CaseState(CaseRequest):
     a1: A1RunEnvelope | None = None
     a2: A2RunEnvelope | None = None
     a3: A3RunEnvelope | None = None
+    a4: A4RunEnvelope | None = None
+    prior_a4: A4RunEnvelope | None = None
+    prior_a3: A3RunEnvelope | None = None
     events: list[CaseEvent] = Field(default_factory=list)
-    errors: list[RunError | A2Error | A3Error] = Field(default_factory=list)
+    errors: list[RunError | A2Error | A3Error | A4Error] = Field(default_factory=list)
     review_reason: Nonblank | None = None
-    revision_count: Literal[0] = 0  # No critic/revision loop in this graph.
+    revision_count: Literal[0, 1] = 0
 
     @model_validator(mode="after")
     def check_outcome(self) -> Self:
+        if self.a4 is not None:
+            if self.a3 is None or self.a2 is None:
+                raise ValueError("A4 requires A2 and A3 outcomes")
+            critic = A4RunEnvelope.model_validate(self.a4.model_dump())
+            if (critic.case_id, critic.run_id, critic.recall_number, critic.snapshot_id,
+                critic.event_id, critic.revision_round) != (
+                    self.case_id, self.run_id, self.recall_number, self.snapshot_id,
+                    self.a2.event_id, self.revision_count):
+                raise ValueError("A4 differs from case context or revision count")
+            if critic.verdict == "approved" and self.a3.requires_human_review:
+                raise ValueError("A4 cannot remove A3 human review")
+            if critic.verdict == "unresolved" and self.status == "human_review":
+                raise ValueError("Unresolved A4 must use unresolved case status")
+            if self.status == "unresolved" and critic.verdict == "unresolved" and critic.error not in self.errors:
+                raise ValueError("Case must preserve the A4 error")
+        if self.revision_count == 1:
+            if self.prior_a4 is None or self.prior_a3 is None or self.prior_a4.verdict != "revise":
+                raise ValueError("Revision requires original A3 and A4 artifacts")
+            if self.prior_a4.revision_round != 0 or self.prior_a4.revision_request.target_agent != "a3":
+                raise ValueError("Only one A3 replay is supported")
+            validate_plan_against_a2(self.prior_a3, self.a2)
+            for prior in (self.prior_a4, self.prior_a3):
+                if (prior.case_id, prior.run_id, prior.recall_number, prior.snapshot_id, prior.event_id) != (
+                        self.case_id, self.run_id, self.recall_number, self.snapshot_id, self.a2.event_id):
+                    raise ValueError("Prior revision artifact differs from selected case")
+        elif self.prior_a4 is not None or self.prior_a3 is not None:
+            raise ValueError("Prior artifacts require a recorded revision")
         if self.a3 is not None:
             if self.a2 is None or self.a2.status not in ("matched", "no_match") or self.a2.requires_human_review:
                 raise ValueError("A3 requires resolved A2 without upstream review")
             validate_plan_against_a2(self.a3, self.a2)
-            if self.status not in ("running", "human_review"):
+            if self.status not in ("running", "human_review") and not (
+                    self.status == "unresolved" and any(isinstance(e, A4Error) for e in self.errors)):
                 raise ValueError("A3 plan requires human review")
         if self.a1 is not None:
             if (self.a1.run_id, self.a1.trace.recall_number, self.a1.trace.snapshot_id) != (
@@ -95,10 +130,10 @@ class CaseState(CaseRequest):
             raise ValueError("Review reason is only valid on the review route")
         if self.status == "unresolved":
             if not self.errors or (self.a2 is not None and self.a2.status != "unresolved"
-                                   and not any(isinstance(error, A3Error) for error in self.errors)):
+                                   and not any(isinstance(error, (A3Error, A4Error)) for error in self.errors)):
                 raise ValueError("Unresolved case requires an error and no resolved A2 result")
             if self.a1 is not None and self.a1.status == "validated" and not any(
-                isinstance(error, (A2Error, A3Error)) for error in self.errors
+                isinstance(error, (A2Error, A3Error, A4Error)) for error in self.errors
             ):
                 raise ValueError("Validated A1 requires an A2 error to stop unresolved")
         return self

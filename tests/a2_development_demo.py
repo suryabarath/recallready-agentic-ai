@@ -45,9 +45,12 @@ def _write_private(path: Path, value: object) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def create_demo(package_dir: Path, output_dir: Path, *, enable_a3: bool = False) -> dict:
+def create_demo(package_dir: Path, output_dir: Path, *, enable_a3: bool = False,
+                enable_a4: bool = False) -> dict:
     """Run three offline routes and save their complete validated states."""
     package_dir, output_dir = Path(package_dir), Path(output_dir)
+    if enable_a4 and not enable_a3:
+        raise ValueError("A4 demo requires A3")
     if output_dir.exists():
         raise ValueError("Refusing to overwrite an existing demonstration directory")
     payload, cases, package_manifest = load_development_package(package_dir)
@@ -78,7 +81,7 @@ def create_demo(package_dir: Path, output_dir: Path, *, enable_a3: bool = False)
                         state = A1Coordinator(
                             source_store, retriever, client,
                             Budget(temporary / f"{route}-usage.sqlite"),
-                            inventory_store=inventory, enable_a3=enable_a3,
+                            inventory_store=inventory, enable_a3=enable_a3, enable_a4=enable_a4,
                         ).run({
                             "case_id": case["case_id"],
                             "run_id": f"offline-demo-{recall}",
@@ -99,19 +102,21 @@ def create_demo(package_dir: Path, output_dir: Path, *, enable_a3: bool = False)
                     "a1_status": state.a1.status if state.a1 else None,
                     "a2_status": state.a2.status if state.a2 else "not_run_requires_A1_review",
                     "a3_status": state.a3.status if state.a3 else "not_run",
+                    "a4_verdict": state.a4.verdict if state.a4 else "not_run",
                     "finding_count": len(state.a2.findings) if state.a2 else 0,
                     "simulated_qdrant_requests": len(qdrant_calls),
                     "simulated_openai_requests": len(model_calls),
                     "state_file": filename,
                 })
     summary = {
-        "demonstration": "RecallReady offline A1-to-A2 representative routes",
+        "demonstration": "RecallReady offline coordinator representative routes",
         "network_mode": "simulated Qdrant and OpenAI fixture responses",
         "a3_enabled": enable_a3,
+        "a4_enabled": enable_a4,
         "local_components_executed": [
             "FDA source and citation validation", "coordinator routing",
             "case-scoped SQLite inventory", "A2 matching", "CaseState validation",
-        ],
+        ] + (["A3 planning"] if enable_a3 else []) + (["A4 deterministic audit"] if enable_a4 else []),
         "development_package_sha256": package_manifest["files"],
         "cases": summaries,
     }
@@ -134,8 +139,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--enable-a3", action="store_true", help="Include deterministic A3 review planning")
+    parser.add_argument("--enable-a4", action="store_true", help="Include deterministic A4 audit; requires --enable-a3")
     args = parser.parse_args(argv)
-    summary = create_demo(args.development_package, args.output, enable_a3=args.enable_a3)
+    summary = create_demo(args.development_package, args.output,
+                          enable_a3=args.enable_a3, enable_a4=args.enable_a4)
     print(json.dumps(summary, indent=2))
     return 0
 

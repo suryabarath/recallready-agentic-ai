@@ -30,8 +30,8 @@ def development():
 
 
 @pytest.mark.parametrize("recall", DEVELOPMENT_RECORDS)
-@pytest.mark.parametrize("enable_a3", [False, True])
-def test_real_development_case(store, tmp_path, development, recall, record_property, enable_a3):
+@pytest.mark.parametrize("enable_a3,enable_a4", [(False, False), (True, False), (True, True)])
+def test_real_development_case(store, tmp_path, development, recall, record_property, enable_a3, enable_a4):
     payload, cases, _ = development
     case = next(c for c in cases if c["recall_number"] == recall)
     rows = [r for r in payload["records"] if r["inventory_set_id"] == case["inventory_set_id"]]
@@ -49,7 +49,7 @@ def test_real_development_case(store, tmp_path, development, recall, record_prop
         with client_for([(json.dumps(proposal), "completed")], model_calls) as client:
             result = A1Coordinator(store, retriever_for(store, points_for(store, recall), cloud_calls),
                                    client, Budget(tmp_path / "usage.sqlite"), inventory_store=inventory,
-                                   enable_a3=enable_a3).run({
+                                   enable_a3=enable_a3, enable_a4=enable_a4).run({
                 "case_id": case["case_id"], "run_id": "development-" + recall,
                 "recall_number": recall, "snapshot_id": case["snapshot_id"], "event_id": case["event_id"],
             })
@@ -59,6 +59,7 @@ def test_real_development_case(store, tmp_path, development, recall, record_prop
     needs_review = recall in GROUP_C or bool(base["facts"]["uncertainties"])
     if needs_review:
         assert result.status == "human_review" and result.a2 is None
+        assert result.a4 is None
         assert not inventory_queries
     else:
         assert result.a2 is not None
@@ -70,6 +71,9 @@ def test_real_development_case(store, tmp_path, development, recall, record_prop
             if enable_a3 and not result.a2.requires_human_review:
                 assert result.a3 is not None and result.a3.status == "planned"
                 assert result.a3.requires_human_review
+                if enable_a4:
+                    assert result.a4.verdict == "human_review" and result.a4.findings == []
+                    assert result.a4.review_boundary_verified and not result.a4.trace.llm_invoked
         originals = {row["item_id"]: row for row in rows}
         for finding in result.a2.findings:
             original = originals[finding.item_id]
@@ -87,6 +91,7 @@ def test_real_development_case(store, tmp_path, development, recall, record_prop
     assert CaseState.model_validate_json(result.model_dump_json()) == result
     record_property("recall_number", recall)
     record_property("a3_enabled", enable_a3)
+    record_property("a4_enabled", enable_a4)
     record_property("inventory_set_id", case["inventory_set_id"])
     record_property("case_status", result.status)
     record_property("a2_status", result.a2.status if result.a2 else "not_run_requires_A1_review")
