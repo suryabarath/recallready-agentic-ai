@@ -166,13 +166,18 @@ class A1Coordinator:
                 return result
 
             critic = audit(state.a3, 0)
+            updates["a4"] = critic
             events.append(_event("a4_" + critic.verdict))
             if critic.verdict == "revise" and critic.revision_request.target_agent == "a3":
+                # Preserve the completed audit and consume the single replay
+                # attempt before planning; a failed replay must retain both.
+                updates = {"a4": None, "prior_a4": critic, "prior_a3": state.a3,
+                           "revision_count": 1}
+                events.append(_event("revision_replay_started"))
                 plan = plan_response(state.a2)
                 validate_plan_against_a2(plan, state.a2)
-                updates = {"prior_a4": critic, "prior_a3": state.a3,
-                           "revision_count": 1, "a3": plan}
-                events += [_event("revision_replay_started"), _event("a3_replanned")]
+                updates["a3"] = plan
+                events.append(_event("a3_replanned"))
                 critic = audit(plan, 1)
                 events.append(_event("a4_" + critic.verdict))
             # A1/A2 requests remain visible for human review; neither has a

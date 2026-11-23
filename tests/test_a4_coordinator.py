@@ -108,3 +108,30 @@ def test_invalid_stage_flags_fail_before_execution(store, tmp_path, flags):
     with client_for([], []) as client, pytest.raises(ValueError):
         A1Coordinator(store, retriever_for(store, [], []), client,
                       Budget(tmp_path / "unused.sqlite"), **flags)
+
+
+@pytest.mark.parametrize("field", ["verified_evidence_ids", "verified_item_ids"])
+def test_shared_state_binds_critic_provenance_to_upstream_context(store, tmp_path, field):
+    state, _ = execute(store, tmp_path)
+    data = state.model_dump()
+    data["a4"]["trace"][field] = ["OTHER-CASE-REFERENCE"]
+    with pytest.raises(ValueError, match="A4 provenance"):
+        CaseState.model_validate(data)
+
+
+def test_replan_failure_keeps_first_audit_and_records_attempt(store, tmp_path, monkeypatch):
+    from a3_agent import plan_response
+    calls = []
+    def fail_on_replay(a2):
+        calls.append(a2)
+        if len(calls) == 2:
+            raise RuntimeError("private replay diagnostic")
+        return plan_response(a2)
+    monkeypatch.setattr("coordinator.plan_response", fail_on_replay)
+    state, seen = execute(store, tmp_path,
+                          critic_outputs=[(json.dumps(critique()), "completed")], enable_llm=True)
+    assert state.status == "unresolved" and state.revision_count == 1
+    assert state.prior_a4.verdict == "revise" and state.prior_a4.trace.model_attempts == 1
+    assert state.prior_a3 == state.a3 and state.a4 is None
+    assert len(seen) == 2 and len(calls) == 2
+    assert "private replay diagnostic" not in state.model_dump_json()

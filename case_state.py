@@ -102,6 +102,12 @@ class CaseState(CaseRequest):
                 raise ValueError("A2 differs from selected case/run context")
             evidence = set(result.facts.evidence_ids)
             identifiers = {item.value for item in result.facts.identifiers}
+            items = {finding.item_id for finding in self.a2.findings}
+            for critic in (self.a4, self.prior_a4):
+                if critic is not None and (
+                        not set(critic.trace.verified_evidence_ids) <= evidence
+                        or not set(critic.trace.verified_item_ids) <= items):
+                    raise ValueError("A4 provenance differs from upstream case references")
             for finding in self.a2.findings:
                 if not set(finding.a1_evidence_ids) <= evidence:
                     raise ValueError("A2 finding cites evidence outside validated A1")

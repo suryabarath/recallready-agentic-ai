@@ -1,5 +1,10 @@
 # Agent 4 review, fixes and coordinator integration
 
+The subsequent [final review and team handoff](A1_A4_INTEGRATION_HANDOFF_2026-11-24.md)
+records two additional reproduced boundary/failure fixes and the latest
+1,092-test regression result. The measurements below describe the initial
+A4 checkpoint.
+
 ## Source and scope
 
 Reviewed the uploaded A4 at `origin/Agent4`, commit
