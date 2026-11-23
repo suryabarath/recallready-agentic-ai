@@ -30,7 +30,8 @@ def development():
 
 
 @pytest.mark.parametrize("recall", DEVELOPMENT_RECORDS)
-def test_real_development_case(store, tmp_path, development, recall, record_property):
+@pytest.mark.parametrize("enable_a3", [False, True])
+def test_real_development_case(store, tmp_path, development, recall, record_property, enable_a3):
     payload, cases, _ = development
     case = next(c for c in cases if c["recall_number"] == recall)
     rows = [r for r in payload["records"] if r["inventory_set_id"] == case["inventory_set_id"]]
@@ -47,7 +48,8 @@ def test_real_development_case(store, tmp_path, development, recall, record_prop
         inventory._db.set_trace_callback(inventory_queries.append)
         with client_for([(json.dumps(proposal), "completed")], model_calls) as client:
             result = A1Coordinator(store, retriever_for(store, points_for(store, recall), cloud_calls),
-                                   client, Budget(tmp_path / "usage.sqlite"), inventory_store=inventory).run({
+                                   client, Budget(tmp_path / "usage.sqlite"), inventory_store=inventory,
+                                   enable_a3=enable_a3).run({
                 "case_id": case["case_id"], "run_id": "development-" + recall,
                 "recall_number": recall, "snapshot_id": case["snapshot_id"], "event_id": case["event_id"],
             })
@@ -64,7 +66,10 @@ def test_real_development_case(store, tmp_path, development, recall, record_prop
             assert result.status == "unresolved"
             assert result.a2.error.code == "ambiguous_recall_scope"
         else:
-            assert result.status == ("human_review" if result.a2.requires_human_review else "a2_completed")
+            assert result.status == ("human_review" if result.a2.requires_human_review or enable_a3 else "a2_completed")
+            if enable_a3 and not result.a2.requires_human_review:
+                assert result.a3 is not None and result.a3.status == "planned"
+                assert result.a3.requires_human_review
         originals = {row["item_id"]: row for row in rows}
         for finding in result.a2.findings:
             original = originals[finding.item_id]
@@ -81,6 +86,7 @@ def test_real_development_case(store, tmp_path, development, recall, record_prop
     assert hashlib.sha256(db.read_bytes()).hexdigest() == before
     assert CaseState.model_validate_json(result.model_dump_json()) == result
     record_property("recall_number", recall)
+    record_property("a3_enabled", enable_a3)
     record_property("inventory_set_id", case["inventory_set_id"])
     record_property("case_status", result.status)
     record_property("a2_status", result.a2.status if result.a2 else "not_run_requires_A1_review")

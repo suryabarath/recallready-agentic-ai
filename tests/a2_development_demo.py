@@ -45,7 +45,7 @@ def _write_private(path: Path, value: object) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def create_demo(package_dir: Path, output_dir: Path) -> dict:
+def create_demo(package_dir: Path, output_dir: Path, *, enable_a3: bool = False) -> dict:
     """Run three offline routes and save their complete validated states."""
     package_dir, output_dir = Path(package_dir), Path(output_dir)
     if output_dir.exists():
@@ -78,7 +78,7 @@ def create_demo(package_dir: Path, output_dir: Path) -> dict:
                         state = A1Coordinator(
                             source_store, retriever, client,
                             Budget(temporary / f"{route}-usage.sqlite"),
-                            inventory_store=inventory,
+                            inventory_store=inventory, enable_a3=enable_a3,
                         ).run({
                             "case_id": case["case_id"],
                             "run_id": f"offline-demo-{recall}",
@@ -98,6 +98,7 @@ def create_demo(package_dir: Path, output_dir: Path) -> dict:
                     "case_status": state.status,
                     "a1_status": state.a1.status if state.a1 else None,
                     "a2_status": state.a2.status if state.a2 else "not_run_requires_A1_review",
+                    "a3_status": state.a3.status if state.a3 else "not_run",
                     "finding_count": len(state.a2.findings) if state.a2 else 0,
                     "simulated_qdrant_requests": len(qdrant_calls),
                     "simulated_openai_requests": len(model_calls),
@@ -106,6 +107,7 @@ def create_demo(package_dir: Path, output_dir: Path) -> dict:
     summary = {
         "demonstration": "RecallReady offline A1-to-A2 representative routes",
         "network_mode": "simulated Qdrant and OpenAI fixture responses",
+        "a3_enabled": enable_a3,
         "local_components_executed": [
             "FDA source and citation validation", "coordinator routing",
             "case-scoped SQLite inventory", "A2 matching", "CaseState validation",
@@ -131,8 +133,9 @@ def main(argv: list[str] | None = None) -> int:
         default=ROOT / "runtime" / "a2_development_18_v1",
     )
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--enable-a3", action="store_true", help="Include deterministic A3 review planning")
     args = parser.parse_args(argv)
-    summary = create_demo(args.development_package, args.output)
+    summary = create_demo(args.development_package, args.output, enable_a3=args.enable_a3)
     print(json.dumps(summary, indent=2))
     return 0
 

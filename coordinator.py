@@ -1,4 +1,4 @@
-"""Bounded A1 and optional A2 graph; no stock actions or later agents."""
+"""Bounded A1, optional A2 and optional A3 review planning graph."""
 
 from datetime import datetime, timezone
 
@@ -8,6 +8,7 @@ from openai import OpenAI
 
 from a1_run import RunError, run_a1_with_trace
 from a2_agent import A2Error, run_a2
+from a3_agent import A3Error, plan_response, validate_plan_against_a2
 from case_state import CaseEvent, CaseRequest, CaseState
 from fda_store import FDAStore
 from group_c_contract import GroupCResult
@@ -30,7 +31,10 @@ class A1Coordinator:
 
     def __init__(self, store: FDAStore, retriever: QdrantA1, client: OpenAI, budget: Budget, *,
                  approved_lots: tuple[HumanLotApproval, ...] = (), max_output_tokens: int = 4000,
-                 inventory_store: InventoryStore | None = None):
+                 inventory_store: InventoryStore | None = None, enable_a3: bool = False):
+        if type(enable_a3) is not bool or (enable_a3 and inventory_store is None):
+            raise ValueError("A3 requires an inventory store and a boolean enable_a3 flag")
+        self.enable_a3 = enable_a3
         self.store, self.retriever, self.client, self.budget = store, retriever, client, budget
         self.approved_lots = approved_lots
         self.max_output_tokens = max_output_tokens
@@ -46,10 +50,15 @@ class A1Coordinator:
         routes = {"complete": "complete", "review": "review", "stop": "stop"}
         terminals = ["complete", "review", "stop"]
         if inventory_store is not None:
+            if enable_a3:
+                graph.add_node("plan_a3", self._plan_a3)
+                graph.add_conditional_edges("plan_a3", lambda state: "review" if state.a3 else "stop",
+                                            {"review": "review", "stop": "stop"})
             graph.add_node("investigate_a2", self._investigate_a2)
             graph.add_node("a2_complete", self._a2_complete)
             graph.add_conditional_edges("investigate_a2", self._after_a2,
-                                        {"complete": "a2_complete", "review": "review", "stop": "stop"})
+                                        {"complete": "plan_a3" if enable_a3 else "a2_complete",
+                                         "review": "review", "stop": "stop"})
             routes["investigate_a2"] = "investigate_a2"
             terminals.append("a2_complete")
         graph.add_conditional_edges("interpret_a1", self._route, routes)
@@ -114,6 +123,16 @@ class A1Coordinator:
             return "stop"
         return "review" if state.a2.requires_human_review else "complete"
 
+    def _plan_a3(self, state: CaseState) -> dict:
+        try:
+            plan = plan_response(state.a2)
+            validate_plan_against_a2(plan, state.a2)
+            CaseState.model_validate(state.model_dump() | {"a3": plan})
+        except Exception:
+            error = A3Error(message="A3 planning failed; inspect the case before rerunning.")
+            return {"errors": [error], "events": state.events + [_event("a3_unexpected_failure")]}
+        return {"a3": plan, "events": state.events + [_event("a3_planned")]}
+
     @staticmethod
     def _a2_complete(state: CaseState) -> dict:
         return {"status": "a2_completed", "events": state.events + [_event("a2_completed")]}
@@ -124,7 +143,8 @@ class A1Coordinator:
 
     @staticmethod
     def _review(state: CaseState) -> dict:
-        reason = ("A2 partial inventory findings require human review."
+        reason = ("A3 proposed actions require human review." if state.a3 is not None else
+                  "A2 partial inventory findings require human review."
                   if state.a2 is not None else "A1 relationships or uncertainties require human review.")
         return {"status": "human_review", "review_reason": reason,
                 "events": state.events + [_event("human_review")]}
