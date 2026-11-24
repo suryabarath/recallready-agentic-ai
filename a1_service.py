@@ -13,8 +13,9 @@ from models import A1Result
 from qdrant_a1 import EvidenceHit, QdrantA1
 from reviews import check_reviews
 from source import DEVELOPMENT_RECORDS, FIELDS, GROUP_C
-from validation import HumanLotApproval
+from validation import HumanLotApproval, validate_result
 from a1_trace import active_run, RetrievedReference
+from corrections import a1_focus_fields
 
 
 # Recall selection is exact. This fixed query only ranks passages within it.
@@ -28,7 +29,8 @@ class A1RunError(InterpretationError):
 def run_a1(store: FDAStore, retriever: QdrantA1, client: OpenAI, budget: Budget, *,
            recall_number: str, snapshot_id: str, event_id: str | None = None,
            approved_lots: tuple[HumanLotApproval, ...] = (),
-           max_output_tokens: int = 4000) -> A1Result | GroupCResult:
+           max_output_tokens: int = 4000, original_result: A1Result | None = None,
+           correction_evidence_ids: tuple[str, ...] = ()) -> A1Result | GroupCResult:
     """Return the existing validated contract; never fall back after retrieval failure.
 
     The caller owns resources, credentials, budget and explicit human reviews.
@@ -56,10 +58,16 @@ def run_a1(store: FDAStore, retriever: QdrantA1, client: OpenAI, budget: Budget,
             recorder.trace.archive_sha256 = store.archive_sha256
         if recall_number in GROUP_C and approved_lots:
             raise A1RunError("Group C does not accept Group A/B lot approvals")
+        if original_result is not None or correction_evidence_ids:
+            a1_focus_fields(original_result, correction_evidence_ids)
+            if recall_number in GROUP_C:
+                raise A1RunError("Group C corrections require human review")
         try:
             check_reviews(approved_lots, store, **ctx)
         except (ValueError, TypeError) as exc:
             raise A1RunError(str(exc), stage="preflight", code="invalid_review") from exc
+        if original_result is not None:
+            validate_result(original_result.model_dump(), store, approved_lots=approved_lots, **ctx)
 
         stage = "retrieval"
         started = time.perf_counter()
@@ -89,7 +97,8 @@ def run_a1(store: FDAStore, retriever: QdrantA1, client: OpenAI, budget: Budget,
                                      snapshot_id=snapshot_id, max_output_tokens=max_output_tokens)
         return interpret(store, client, budget, recall_number=recall_number,
                          snapshot_id=snapshot_id, approved_lots=approved_lots,
-                         max_output_tokens=max_output_tokens)
+                         max_output_tokens=max_output_tokens, original_result=original_result,
+                         correction_evidence_ids=correction_evidence_ids)
     except (sqlite3.Error, OSError):
         raise A1RunError(f"A1 {stage} failed: local storage unavailable; no automatic retry",
                          stage=stage, code="local_storage_unavailable") from None

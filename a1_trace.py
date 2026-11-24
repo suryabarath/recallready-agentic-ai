@@ -5,7 +5,7 @@ from typing import Literal
 
 from pydantic import Field
 
-from models import StrictModel
+from models import EvidenceIDs, StrictModel
 
 
 RequestState = Literal["not_sent", "outcome_unknown", "response_received"]
@@ -44,6 +44,7 @@ class RunTrace(StrictModel):
     elapsed_seconds: float = 0.0
     retrieval_seconds: float | None = None
     retrieved: list[RetrievedReference] = Field(default_factory=list)
+    correction_evidence_ids: EvidenceIDs = Field(default_factory=list)
     calls: list[ModelCallTrace] = Field(default_factory=list)
     accounting_available: bool = True
     model_attempts: int = 0

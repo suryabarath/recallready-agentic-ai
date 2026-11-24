@@ -6,6 +6,16 @@ For new development, follow [CONTRIBUTING](CONTRIBUTING.md): start from current
 [CI setup](docs/CI_SETUP_2026-11-22.md) records workflow verification, the
 private source fixture, and the public repository's review and CI rules.
 
+**Local targeted-correction update — 24 November 2026:** the
+[implementation guide](docs/TARGETED_CORRECTION_IMPLEMENTATION_2026-11-24.md)
+documents opt-in A1/A2 corrections, one shared correction limit, affected-stage
+reruns and preserved original results. Existing callers keep upstream escalation
+by default. This local change has offline verification; it has not been pushed
+or tested with new live API calls. Human review remains required.
+The subsequent [technical review](docs/TARGETED_CORRECTION_REVIEW_2026-11-24.md)
+fixes an A1 correction-handoff failure, records the 1,159-test regression and
+75 approved development checks, and identifies the local recovery checkpoint.
+
 **Local A1–A4 update — 24 November 2026:** see the
 [A4 review and integration guide](docs/A4_REVIEW_AND_INTEGRATION_2026-11-24.md)
 for the current optional A3/A4 coordinator path, citation/accounting fixes,

@@ -80,6 +80,9 @@ Flag ONLY concrete, evidence-backed issues:
 Cite ONLY evidence_ids and item_ids present in the supplied input. Do not invent new actions
 or override human-review uncertainties. If everything is grounded and appropriate, return
 passed=true with an empty findings list. If passed=false, include at least one blocking finding.
+For a concrete A1 identifier-interpretation issue, use code a1_identifier_interpretation
+and cite its product_description/code_info evidence. Unresolved source meaning is not a
+fixable interpretation error. Never request a policy change or removal of uncertainty.
 """
 
 
@@ -524,11 +527,14 @@ def run_a4(
     model: str = _APPROVED_MODEL,
     max_output_tokens: int = 1500,
     enable_llm_critic: bool = False,
+    enable_upstream_corrections: bool = False,
     approved_lots: tuple = (),
 ) -> A4RunEnvelope:
     """Audit current A1/A2/A3 contracts; model execution requires explicit opt-in."""
     if type(enable_llm_critic) is not bool:
         raise ValueError("enable_llm_critic must be boolean")
+    if type(enable_upstream_corrections) is not bool:
+        raise ValueError("enable_upstream_corrections must be boolean")
     case_id = TypeAdapter(Nonblank).validate_python(case_id)
     run_id = TypeAdapter(Nonblank).validate_python(run_id)
     recall_number = TypeAdapter(Nonblank).validate_python(recall_number)
@@ -594,6 +600,7 @@ def run_a4(
         a2_envelope,
         normalized_a3,
         approved_lots=approved_lots,
+        enable_upstream_corrections=enable_upstream_corrections,
         case_id=case_id,
         run_id=run_id,
         recall_number=recall_number,

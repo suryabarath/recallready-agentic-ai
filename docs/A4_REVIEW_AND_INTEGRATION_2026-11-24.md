@@ -1,5 +1,10 @@
 # Agent 4 review, fixes and coordinator integration
 
+Subsequent local work implements opt-in A1/A2 corrections; see the
+[targeted-correction guide](TARGETED_CORRECTION_IMPLEMENTATION_2026-11-24.md).
+The upstream-escalation limits below describe the earlier checkpoint and
+remain the default behavior when the new option is disabled.
+
 The subsequent [final review and team handoff](A1_A4_INTEGRATION_HANDOFF_2026-11-24.md)
 records two additional reproduced boundary/failure fixes and the latest
 1,092-test regression result. The measurements below describe the initial

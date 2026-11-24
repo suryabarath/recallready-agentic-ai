@@ -75,7 +75,8 @@ class DeterministicAuditOutcome(StrictModel):
 
 def run_deterministic_checks(fda_store, inventory_store, a1_envelope, a2_envelope,
                              a3_envelope, *, case_id, run_id, recall_number,
-                             snapshot_id, event_id=None, approved_lots=()):
+                             snapshot_id, event_id=None, approved_lots=(),
+                             enable_upstream_corrections=False):
     """Re-resolve evidence, replay exact matching and verify the actual A3 plan.
 
     Invalid claims become explicit blocking findings; storage/context failures
@@ -92,7 +93,8 @@ def run_deterministic_checks(fda_store, inventory_store, a1_envelope, a2_envelop
             finding_id=f"DET-{len(audit.findings) + 1:03d}", source="deterministic",
             severity="blocking", category=category, target_agent=target,
             code=code, message=message,
-            fixable_by_revision=target == "a3",
+            fixable_by_revision=(target == "a3" or (enable_upstream_corrections
+                                 and target == "a2" and code == "a2_sqlite_or_match_drift")),
         ))
 
     audit.checks_run.append("context_identity")
