@@ -1,13 +1,17 @@
 # Targeted A1/A2 correction and downstream reruns
 
-Implemented locally on `feature/targeted-corrections-local`, based on merged
-checkpoint `e81e5c3`. This work has not been pushed. The
-earlier live-tested checkpoint `a591cde` remains unchanged. This guide supersedes
+Implemented on `feature/targeted-corrections-local`, based on merged
+checkpoint `e81e5c3`. The earlier live-tested checkpoint `a591cde` remains
+unchanged. See the [PR verification record](TARGETED_CORRECTION_PR_VERIFICATION_2026-11-26.md)
+for the subsequent publication checks and current limitations. This guide supersedes
 earlier notes that automatic A1/A2 correction is entirely unimplemented.
 
 The subsequent [technical review and checkpoint record](TARGETED_CORRECTION_REVIEW_2026-11-24.md)
 adds four reproduced A1-handoff regressions and the final 1,159-test result.
 The verification counts below retain the preceding implementation checkpoint.
+A later [controlled live smoke](TARGETED_CORRECTION_LIVE_SMOKE_2026-11-24.md)
+verified the normal A1–A4 path with corrections enabled and no correction
+requested. The correction paths themselves remain verified offline only.
 
 ## Problem and resulting behavior
 

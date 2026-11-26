@@ -10,8 +10,10 @@ private source fixture, and the public repository's review and CI rules.
 [implementation guide](docs/TARGETED_CORRECTION_IMPLEMENTATION_2026-11-24.md)
 documents opt-in A1/A2 corrections, one shared correction limit, affected-stage
 reruns and preserved original results. Existing callers keep upstream escalation
-by default. This local change has offline verification; it has not been pushed
-or tested with new live API calls. Human review remains required.
+by default. This local change has offline verification and one
+[controlled live smoke](docs/TARGETED_CORRECTION_LIVE_SMOKE_2026-11-24.md)
+of the normal A1–A4 path with corrections enabled. No live correction occurred.
+Human review remains required.
 The subsequent [technical review](docs/TARGETED_CORRECTION_REVIEW_2026-11-24.md)
 fixes an A1 correction-handoff failure, records the 1,159-test regression and
 75 approved development checks, and identifies the local recovery checkpoint.
