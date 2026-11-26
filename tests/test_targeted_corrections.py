@@ -12,14 +12,17 @@ import coordinator as module
 from a1_trace import active_run
 from case_state import CaseState
 from coordinator import A1Coordinator
-from corrections import build_correction, validate_a1_correction
+from corrections import validate_a1_correction
 from interpreter import Budget, InterpretationError, interpret
 from inventory_store import InventoryStore
 from source import DEVELOPMENT_RECORDS, GROUP_A
-from test_a1_service import fixture_output, points_for, retriever_for, store
+from test_a1_service import fixture_output, points_for, retriever_for
 from test_a2_isolated_integration import make_inventory
 from test_coordinator import request_for
 from test_interpreter import client_for
+
+
+pytest_plugins = ("test_a1_service",)
 
 
 PASSED = dict(passed=True, findings=[], suggested_revision_target=None, revision_instructions=None)

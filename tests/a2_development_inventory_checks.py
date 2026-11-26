@@ -18,8 +18,11 @@ from interpreter import Budget
 from inventory_loader import build_inventory_store
 from inventory_store import InventoryStore
 from source import DEVELOPMENT_RECORDS, GROUP_C
-from test_a1_service import fixture_output, points_for, retriever_for, store
+from test_a1_service import fixture_output, points_for, retriever_for
 from test_interpreter import client_for
+
+
+pytest_plugins = ("test_a1_service",)
 
 
 @pytest.fixture(scope="module")

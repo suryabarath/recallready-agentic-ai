@@ -66,3 +66,31 @@ inventory, private states, ledger, credentials and Qdrant contents are excluded.
 The existing recovery tag still identifies c396143. A teammate other than the
 author must review the PR, and GitHub CI must pass before merge. Local results
 do not establish hosted CI success.
+
+## Static-quality follow-up before publication
+
+Ruff 0.14.6 was installed as local development tooling without changing
+application requirements. The first scan found unused imports and shared
+pytest-fixture import warnings. Two unused imports were removed; the two
+changed test modules now register test_a1_service through pytest_plugins.
+No assertions or expected results changed.
+
+```bash
+.venv/bin/ruff check --no-cache --select E9,F,B \
+  a1_run.py a1_service.py a1_trace.py a4_agent.py a4_checks.py \
+  case_state.py coordinator.py corrections.py interpreter.py \
+  tests/a2_development_inventory_checks.py \
+  tests/live_targeted_correction_smoke.py tests/test_targeted_corrections.py
+```
+
+All selected Ruff checks passed on these 12 Python files. After the fixes,
+the correction/development selection passed **142 tests in 3.66 seconds**
+(67 correction tests plus 75 development checks). The full permitted
+regression then passed **1,159 tests in 7.20 seconds**. pip check reported
+no broken requirements; git diff --check passed. Test counts overlap and
+must not be summed as independent coverage.
+
+These checks cover Python errors, unused names/imports and selected common
+bug patterns. They do not establish static typing, full formatting compliance,
+a dependency vulnerability audit, Windows smoke execution, or live correction
+behavior. Ruff is not added as a new required CI gate in this PR.

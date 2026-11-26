@@ -35,7 +35,6 @@ from a4_checks import (
     CheckSeverity,
     CheckSource,
     CriticFinding,
-    DeterministicAuditOutcome,
     FindingCategory,
     RevisionRequest,
     RevisionTarget,
