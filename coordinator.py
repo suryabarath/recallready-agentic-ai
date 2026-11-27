@@ -12,6 +12,7 @@ from a3_agent import A3Error, plan_response, validate_plan_against_a2
 from a4_agent import A4RunEnvelope, run_a4
 from a4_checks import A4Error
 from case_state import CaseEvent, CaseRequest, CaseState
+from corrections import build_correction
 from fda_store import FDAStore
 from group_c_contract import GroupCResult
 from interpreter import Budget
@@ -34,7 +35,8 @@ class A1Coordinator:
     def __init__(self, store: FDAStore, retriever: QdrantA1, client: OpenAI, budget: Budget, *,
                  approved_lots: tuple[HumanLotApproval, ...] = (), max_output_tokens: int = 4000,
                  inventory_store: InventoryStore | None = None, enable_a3: bool = False,
-                 enable_a4: bool = False, enable_a4_llm: bool = False):
+                 enable_a4: bool = False, enable_a4_llm: bool = False,
+                 enable_targeted_corrections: bool = False):
         if type(enable_a3) is not bool or (enable_a3 and inventory_store is None):
             raise ValueError("A3 requires an inventory store and a boolean enable_a3 flag")
         self.enable_a3 = enable_a3
@@ -43,6 +45,9 @@ class A1Coordinator:
         if (enable_a4 and not enable_a3) or (enable_a4_llm and not enable_a4):
             raise ValueError("A4 requires A3; its model flag requires A4")
         self.enable_a4_llm = enable_a4_llm
+        if type(enable_targeted_corrections) is not bool or (enable_targeted_corrections and not enable_a4):
+            raise ValueError("Targeted corrections require A4 and a boolean flag")
+        self.enable_targeted_corrections = enable_targeted_corrections
         self.store, self.retriever, self.client, self.budget = store, retriever, client, budget
         self.approved_lots = approved_lots
         self.max_output_tokens = max_output_tokens
@@ -90,12 +95,22 @@ class A1Coordinator:
         return {"status": "running", "events": [_event("started")]}
 
     def _interpret(self, state: CaseState) -> dict:
+        return self._interpret_a1(state)
+
+    def _interpret_a1(self, state: CaseState, *, original_result=None,
+                      correction_evidence_ids=()) -> dict:
         try:
             envelope = run_a1_with_trace(
                 self.store, self.retriever, self.client, self.budget,
                 run_id=state.run_id, recall_number=state.recall_number,
                 snapshot_id=state.snapshot_id, event_id=state.event_id,
-                approved_lots=self.approved_lots, max_output_tokens=self.max_output_tokens)
+                approved_lots=self.approved_lots, max_output_tokens=self.max_output_tokens,
+                original_result=original_result, correction_evidence_ids=correction_evidence_ids)
+            # Reject a malformed handoff inside this failure boundary. Returning
+            # it would make graph-state coercion raise before the saved audit
+            # and conservative failure outcome could reach the caller.
+            CaseState.model_validate(state.model_dump() | {
+                "a1": envelope, "errors": [envelope.error] if envelope.error else []})
         except Exception:
             # A crash may follow a chargeable call. Never fabricate a trace or retry it.
             error = RunError(stage="interpretation", code="coordinator_internal_failure",
@@ -153,35 +168,60 @@ class A1Coordinator:
         updates = {}
         events = list(state.events)
         try:
+            def snapshot(**changes):
+                return CaseState.model_validate(state.model_dump() | updates | changes)
+
             def audit(plan, revision_round):
+                current = snapshot(a3=plan)
                 result = run_a4(
-                    self.store, self.inventory_store, state.a1, state.a2, plan,
+                    self.store, self.inventory_store, current.a1, current.a2, plan,
                     case_id=state.case_id, run_id=state.run_id, recall_number=state.recall_number,
-                    snapshot_id=state.snapshot_id, event_id=state.a2.event_id,
+                    snapshot_id=state.snapshot_id, event_id=current.a2.event_id,
                     revision_round=revision_round, client=self.client, budget=self.budget,
-                    enable_llm_critic=self.enable_a4_llm, approved_lots=self.approved_lots)
+                    enable_llm_critic=self.enable_a4_llm, approved_lots=self.approved_lots,
+                    enable_upstream_corrections=self.enable_targeted_corrections)
                 result = A4RunEnvelope.model_validate(result.model_dump())
-                CaseState.model_validate(state.model_dump() | updates | {
-                    "a4": result, "errors": [result.error] if result.error else []})
+                snapshot(a3=plan, a4=result, errors=[result.error] if result.error else [])
                 return result
 
             critic = audit(state.a3, 0)
             updates["a4"] = critic
             events.append(_event("a4_" + critic.verdict))
-            if critic.verdict == "revise" and critic.revision_request.target_agent == "a3":
+            correction = build_correction(critic, state.a1, case_id=state.case_id,
+                run_id=state.run_id, recall_number=state.recall_number,
+                snapshot_id=state.snapshot_id, enable_upstream=self.enable_targeted_corrections)
+            if correction is not None:
                 # Preserve the completed audit and consume the single replay
                 # attempt before planning; a failed replay must retain both.
                 updates = {"a4": None, "prior_a4": critic, "prior_a3": state.a3,
-                           "revision_count": 1}
+                           "revision_count": 1, "correction": correction}
                 events.append(_event("revision_replay_started"))
-                plan = plan_response(state.a2)
-                validate_plan_against_a2(plan, state.a2)
-                updates["a3"] = plan
-                events.append(_event("a3_replanned"))
+                if correction.target_agent in ("a1", "a2"):
+                    updates.update(prior_a1=state.a1, prior_a2=state.a2, a2=None, a3=None)
+                    if correction.target_agent == "a1":
+                        updates["a1"] = None
+                        updates.update(self._interpret_a1(snapshot(events=events),
+                            original_result=state.a1.result,
+                            correction_evidence_ids=tuple(correction.evidence_ids)))
+                        events = updates.pop("events")
+                        if self._route(snapshot()) != "investigate_a2":
+                            return updates | {"events": events}
+                    updates.update(self._investigate_a2(snapshot(events=events)))
+                    events = updates.pop("events")
+                    if self._after_a2(snapshot()) != "complete":
+                        return updates | {"events": events}
+                    updates.update(self._plan_a3(snapshot(events=events)))
+                    events = updates.pop("events")
+                    if updates.get("a3") is None:
+                        return updates | {"events": events}
+                    plan = updates["a3"]
+                else:
+                    plan = plan_response(state.a2)
+                    validate_plan_against_a2(plan, state.a2)
+                    updates["a3"] = plan
+                    events.append(_event("a3_replanned"))
                 critic = audit(plan, 1)
                 events.append(_event("a4_" + critic.verdict))
-            # A1/A2 requests remain visible for human review; neither has a
-            # targeted correction input. Regenerating A1 is not a correction.
             updates.update(a4=critic, errors=[critic.error] if critic.error else [], events=events)
         except Exception:
             error = A4Error(stage="coordinator", code="critic_internal_failure",

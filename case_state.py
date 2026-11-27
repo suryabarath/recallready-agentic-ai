@@ -1,4 +1,4 @@
-"""Case state for the bounded A1-A4 workflow and one recorded A3 replay."""
+"""Case state for the bounded A1-A4 workflow and one recorded correction."""
 
 from typing import Literal, Self
 
@@ -9,6 +9,7 @@ from a2_agent import A2Error, A2RunEnvelope
 from a3_agent import A3Error, A3RunEnvelope, validate_plan_against_a2
 from a4_agent import A4RunEnvelope
 from a4_checks import A4Error
+from corrections import CorrectionRequest, build_correction, validate_a1_correction
 from group_c_contract import GroupCResult
 from models import Nonblank, StrictModel
 
@@ -38,6 +39,9 @@ class CaseState(CaseRequest):
     a4: A4RunEnvelope | None = None
     prior_a4: A4RunEnvelope | None = None
     prior_a3: A3RunEnvelope | None = None
+    prior_a1: A1RunEnvelope | None = None
+    prior_a2: A2RunEnvelope | None = None
+    correction: CorrectionRequest | None = None
     events: list[CaseEvent] = Field(default_factory=list)
     errors: list[RunError | A2Error | A3Error | A4Error] = Field(default_factory=list)
     review_reason: Nonblank | None = None
@@ -63,14 +67,55 @@ class CaseState(CaseRequest):
         if self.revision_count == 1:
             if self.prior_a4 is None or self.prior_a3 is None or self.prior_a4.verdict != "revise":
                 raise ValueError("Revision requires original A3 and A4 artifacts")
-            if self.prior_a4.revision_round != 0 or self.prior_a4.revision_request.target_agent != "a3":
-                raise ValueError("Only one A3 replay is supported")
-            validate_plan_against_a2(self.prior_a3, self.a2)
+            if self.prior_a4.revision_round != 0:
+                raise ValueError("Correction requires the original round-zero audit")
+            target = self.prior_a4.revision_request.target_agent
+            if target in ("a1", "a2"):
+                if self.prior_a1 is None or self.prior_a2 is None or self.correction is None:
+                    raise ValueError("Upstream correction requires original A1/A2 and its request")
+                # Validate the entire original chain against its own findings,
+                # not the potentially different corrected inventory result.
+                CaseState.model_validate({
+                    **{field: getattr(self, field) for field in CaseRequest.model_fields},
+                    "status": "running", "a1": self.prior_a1, "a2": self.prior_a2,
+                    "a3": self.prior_a3, "a4": self.prior_a4})
+                if target == "a2" and self.a1 != self.prior_a1:
+                    raise ValueError("A2 correction must preserve A1 exactly")
+                if target == "a1" and self.a1 is not None:
+                    if self.a1.trace.correction_evidence_ids != self.correction.evidence_ids:
+                        raise ValueError("A1 trace differs from correction focus")
+                    if self.a1.status == "validated":
+                        validate_a1_correction(self.prior_a1.result, self.a1.result,
+                                               tuple(self.correction.evidence_ids))
+                        for field in ("archive_sha256", "collection", "embedding_model",
+                                      "interpretation_model", "sdk_retries", "max_output_tokens"):
+                            if getattr(self.a1.trace, field) != getattr(self.prior_a1.trace, field):
+                                raise ValueError("A1 correction changes source/model configuration")
+            else:
+                if self.a2 is None or self.prior_a1 is not None or self.prior_a2 is not None:
+                    raise ValueError("A3 replay requires unchanged upstream outcomes")
+                validate_plan_against_a2(self.prior_a3, self.a2)
+            original_a1 = self.prior_a1 if self.prior_a1 is not None else self.a1
+            expected = build_correction(self.prior_a4, original_a1,
+                case_id=self.case_id, run_id=self.run_id, recall_number=self.recall_number,
+                snapshot_id=self.snapshot_id, enable_upstream=True)
+            if expected is None or (self.correction is not None and self.correction != expected):
+                raise ValueError("Correction request differs from the original audit")
+            traces = [original_a1.trace, self.prior_a4.trace]
+            if target == "a1" and self.a1 is not None:
+                traces.append(self.a1.trace)
+            if self.a4 is not None:
+                traces.append(self.a4.trace)
+            call_ids = [call.ledger_call_id for trace in traces for call in trace.calls]
+            if len(set(call_ids)) != len(call_ids):
+                raise ValueError("Correction attempts must retain distinct ledger calls")
+            original_event = self.prior_a3.event_id
             for prior in (self.prior_a4, self.prior_a3):
                 if (prior.case_id, prior.run_id, prior.recall_number, prior.snapshot_id, prior.event_id) != (
-                        self.case_id, self.run_id, self.recall_number, self.snapshot_id, self.a2.event_id):
+                        self.case_id, self.run_id, self.recall_number, self.snapshot_id, original_event):
                     raise ValueError("Prior revision artifact differs from selected case")
-        elif self.prior_a4 is not None or self.prior_a3 is not None:
+        elif any(value is not None for value in
+                 (self.prior_a4, self.prior_a3, self.prior_a1, self.prior_a2, self.correction)):
             raise ValueError("Prior artifacts require a recorded revision")
         if self.a3 is not None:
             if self.a2 is None or self.a2.status not in ("matched", "no_match") or self.a2.requires_human_review:
@@ -103,7 +148,8 @@ class CaseState(CaseRequest):
             evidence = set(result.facts.evidence_ids)
             identifiers = {item.value for item in result.facts.identifiers}
             items = {finding.item_id for finding in self.a2.findings}
-            for critic in (self.a4, self.prior_a4):
+            critics = (self.a4,) if self.prior_a2 is not None else (self.a4, self.prior_a4)
+            for critic in critics:
                 if critic is not None and (
                         not set(critic.trace.verified_evidence_ids) <= evidence
                         or not set(critic.trace.verified_item_ids) <= items):

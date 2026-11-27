@@ -9,12 +9,13 @@ import sqlite3
 from openai import OpenAI, OpenAIError
 from pydantic import ValidationError
 
-from models import IdentifierKind, StrictModel
+from models import A1Result, IdentifierKind, StrictModel
 from fda_store import FDAStore
 from source import FIELDS, GROUP_A, GROUP_B, Source
 from validation import ContractError, validate_result
 from reviews import load_reviews, check_reviews, apply_reviews
 from a1_trace import active_run, request_started, response_received
+from corrections import a1_focus_fields, validate_a1_correction
 
 
 class InterpretationError(ValueError):
@@ -124,7 +125,8 @@ class Budget:
 
 def interpret(source: Source, client: OpenAI, budget: Budget, *, recall_number: str,
               snapshot_id: str, model: str = "gpt-6-luna", max_output_tokens: int = 4000,
-              approved_lots: tuple = ()):
+              approved_lots: tuple = (), original_result: A1Result | None = None,
+              correction_evidence_ids: tuple[str, ...] = ()):
     """One generation and at most one structural repair; semantic failures stop.
 
     Caller supplies a client with automatic retries disabled. The CLI does this.
@@ -141,6 +143,17 @@ def interpret(source: Source, client: OpenAI, budget: Budget, *, recall_number: 
         raise InterpretationError("Group C requires the reviewed relationship interpreter")
     record = source.lookup(recall_number, snapshot_id=snapshot_id)
     ctx = dict(recall_number=recall_number, event_id=record['event_id'], snapshot_id=snapshot_id)
+    instructions = INSTRUCTIONS
+    if original_result is not None or correction_evidence_ids:
+        try:
+            focused = a1_focus_fields(original_result, correction_evidence_ids)
+            validate_result(original_result.model_dump(), source, approved_lots=approved_lots, **ctx)
+        except (ValueError, TypeError):
+            raise InterpretationError("Invalid correction context; no request sent",
+                                      stage="preflight", code="invalid_correction") from None
+        instructions += ("\nTargeted correction: reconsider identifier interpretation in these FDA fields only: "
+                         + ", ".join(focused) + ". Preserve all other identifiers and existing uncertainty. "
+                         "Use only the original FDA evidence; do not infer inventory decisions.")
     try:
         check_reviews(approved_lots, source, **ctx)
     except (ValueError, TypeError):
@@ -154,7 +167,7 @@ def interpret(source: Source, client: OpenAI, budget: Budget, *, recall_number: 
     request_input = json.dumps([vars(p) for p in passages], ensure_ascii=False)
     schema = Interpretation.model_json_schema()
     for attempt in range(2):
-        request = dict(model=model, instructions=INSTRUCTIONS, input=request_input,
+        request = dict(model=model, instructions=instructions, input=request_input,
                        reasoning={"effort": "low"}, max_output_tokens=max_output_tokens,
                        service_tier="default", store=False,
                        text={"format": {"type": "json_schema", "name": "a1_interpretation",
@@ -209,10 +222,17 @@ def interpret(source: Source, client: OpenAI, budget: Budget, *, recall_number: 
                               evidence_ids=[p.evidence_id for p in passages]))
     try:
         payload = apply_reviews(payload, approved_lots)
-        return validate_result(payload, source, approved_lots=approved_lots, **ctx)
+        result = validate_result(payload, source, approved_lots=approved_lots, **ctx)
     except (ContractError, ValidationError):
         raise InterpretationError("Model interpretation failed source validation; human review required",
                                   stage="validation", code="citation_source_failed") from None
+    if original_result is not None:
+        try:
+            validate_a1_correction(original_result, result, correction_evidence_ids)
+        except ValueError:
+            raise InterpretationError("Correction changed protected facts; human review required",
+                                      stage="validation", code="correction_scope_violation") from None
+    return result
 
 
 def main(argv=None) -> int:

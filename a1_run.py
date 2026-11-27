@@ -46,7 +46,8 @@ def run_a1_with_trace(store: FDAStore, retriever: QdrantA1, client: OpenAI, budg
                       run_id: str, recall_number: str, snapshot_id: str,
                       event_id: str | None = None,
                       approved_lots: tuple[HumanLotApproval, ...] = (),
-                      max_output_tokens: int = 4000) -> A1RunEnvelope:
+                      max_output_tokens: int = 4000, original_result: A1Result | None = None,
+                      correction_evidence_ids: tuple[str, ...] = ()) -> A1RunEnvelope:
     """Capture one run without reading global ledger differences or closing caller resources.
 
     Callers provide a unique run_id. Invalid envelope argument types raise
@@ -57,6 +58,7 @@ def run_a1_with_trace(store: FDAStore, retriever: QdrantA1, client: OpenAI, budg
     trace = RunTrace(recall_number=recall_number, snapshot_id=snapshot_id,
                      collection=COLLECTION, embedding_model=MODEL,
                      max_output_tokens=max_output_tokens,
+                     correction_evidence_ids=list(correction_evidence_ids),
                      started_utc=datetime.now(timezone.utc).isoformat())
     token = active_run.set(RunRecorder(run_id, trace))
     started = time.perf_counter()
@@ -65,7 +67,8 @@ def run_a1_with_trace(store: FDAStore, retriever: QdrantA1, client: OpenAI, budg
     try:
         result = run_a1(store, retriever, client, budget, recall_number=recall_number,
                         snapshot_id=snapshot_id, event_id=event_id,
-                        approved_lots=approved_lots, max_output_tokens=max_output_tokens)
+                        approved_lots=approved_lots, max_output_tokens=max_output_tokens,
+                        original_result=original_result, correction_evidence_ids=correction_evidence_ids)
     except A1RunError as exc:
         # Safe category messages: do not copy model text or low-level diagnostics into traces.
         message = ("Request may already be charged; reservation retained; no automatic retry."
