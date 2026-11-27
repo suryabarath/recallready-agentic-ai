@@ -15,6 +15,10 @@ from source import Evidence, FIELDS, Source, SourceError
 class ContractError(ValueError):
     """A well-shaped result conflicts with the selected source or review policy."""
 
+    def __init__(self, message: str, *, rule: str = "source_contract_failed"):
+        super().__init__(message)
+        self.rule = rule
+
 
 @dataclass(frozen=True)
 class HumanLotApproval:
@@ -171,11 +175,13 @@ def validate_result(payload: object, source: Source, *, recall_number: str,
                     for a in approved_lots
                 )
                 if not reviewed:
-                    raise ContractError("Ambiguous combined code cannot be a confirmed lot; use other and uncertainty")
+                    raise ContractError("Ambiguous combined code cannot be a confirmed lot; use other and uncertainty",
+                                        rule="ambiguous_lot_requires_review")
             if identifier.kind == "other" and any(
                 span is not None and identifier.value != span for span in ambiguous
             ):
-                raise ContractError("Unresolved combined code must preserve the complete literal span")
+                raise ContractError("Unresolved combined code must preserve the complete literal span",
+                                    rule="ambiguous_span_incomplete")
             if identifier.kind == "other":
                 review_required = True
             else:
@@ -183,7 +189,8 @@ def validate_result(payload: object, source: Source, *, recall_number: str,
                 pattern = (r"\b(?i:" + _LABELS[identifier.kind] + r")\s*[:#]?\s*"
                            + re.escape(identifier.value) + r"(?![\w/\-]|\.\w)")
                 if not any(re.search(pattern, p.original_text) for p in passages):
-                    raise ContractError("Identifier kind lacks explicit source-label support; use other and uncertainty")
+                    raise ContractError("Identifier kind lacks explicit source-label support; use other and uncertainty",
+                                        rule="identifier_label_unsupported")
         # A valid citation on one identifier cannot conceal a second, clearly
         # labeled lot or batch in the same code field. Ambiguous combined spans
         # retain the complete phrase under the existing review policy.
@@ -207,10 +214,12 @@ def validate_result(payload: object, source: Source, *, recall_number: str,
                     for i in facts.identifiers
                 )
             if not covered:
-                raise ContractError(f"Explicit {kind} in source is missing from identifiers")
+                raise ContractError(f"Explicit {kind} in source is missing from identifiers",
+                                    rule="required_identifier_missing")
         require_labeled_product_identifiers(record, facts.identifiers, recall_number)
         if review_required and not facts.uncertainties:
-            raise ContractError("Missing or unresolved facts/identifier meanings require an uncertainty")
+            raise ContractError("Missing or unresolved facts/identifier meanings require an uncertainty",
+                                rule="uncertainty_required")
     except (SourceError, CitationError) as exc:
         raise ContractError(str(exc)) from exc
     return result
