@@ -16,6 +16,7 @@ from validation import ContractError, validate_result
 from reviews import load_reviews, check_reviews, apply_reviews
 from a1_trace import active_run, request_started, response_received
 from corrections import a1_focus_fields, validate_a1_correction
+from a1_diagnostics import record_validation_failure
 
 
 class InterpretationError(ValueError):
@@ -52,6 +53,10 @@ or ambiguous date-like phrases. Preserve an ambiguous combined phrase rather
 than inventing its boundaries. For a lot span containing BC or two date-like
 parts without distinct labels, return the entire literal span as other with an
 uncertainty; do not assert a separate lot. Never interpret Unknown/No codes as identifiers.
+For such an ambiguous span, exclude only the introductory lot label from its value.
+Return one other identifier covering the whole span, without also returning its
+individual parts as lot or date identifiers. A LOT label alone does not resolve
+the meanings of multiple unlabeled date-like parts. State that uncertainty explicitly.
 Disclose incomplete or ambiguous lot/date/package relationships. Do not infer
 expiry from unlabeled dates or expand ranges. No inventory judgments or actions.
 """
@@ -204,12 +209,18 @@ def interpret(source: Source, client: OpenAI, budget: Budget, *, recall_number: 
             # Regenerate from source; do not forward untrusted model text as instructions.
             request_input += '\nPrevious response failed the requested JSON structure. Return all required fields with strict types.'
     identifiers = []
+    def reject(rule, details):
+        record_validation_failure(proposed, rule=rule, details=details, context=ctx,
+                                  response_id=response.id, ledger_call_id=call_id)
+
     for i in proposed.identifiers:
         if not i.evidence_ids:
+            reject("identifier_citation_missing", "Identifier has no citation")
             raise InterpretationError("Identifier has no citation", stage="validation", code="citation_source_failed")
         try:
             first = source.resolve(i.evidence_ids[0], **ctx)
         except ValueError:
+            reject("identifier_citation_invalid", "Unknown or mismatched model citation")
             raise InterpretationError("Unknown or mismatched model citation", stage="validation", code="citation_source_failed") from None
         identifiers.append(dict(kind=i.kind, value=i.value, evidence_ids=i.evidence_ids,
                                 scope_note=first.original_text))
@@ -223,7 +234,14 @@ def interpret(source: Source, client: OpenAI, budget: Budget, *, recall_number: 
     try:
         payload = apply_reviews(payload, approved_lots)
         result = validate_result(payload, source, approved_lots=approved_lots, **ctx)
-    except (ContractError, ValidationError):
+    except (ContractError, ValidationError) as exc:
+        if isinstance(exc, ContractError):
+            reject(exc.rule, str(exc))
+        else:
+            reject("result_structure_invalid", [
+                {"location": list(e["loc"]), "type": e["type"], "message": e["msg"]}
+                for e in exc.errors(include_input=False, include_url=False)
+            ])
         raise InterpretationError("Model interpretation failed source validation; human review required",
                                   stage="validation", code="citation_source_failed") from None
     if original_result is not None:
